@@ -185,6 +185,10 @@ async function describeActiveTab(question = null) {
         // Get active tab
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
+        if (!tab) {
+            throw new Error('No active tab found');
+        }
+
         // Capture screenshot
         const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
             format: 'png'

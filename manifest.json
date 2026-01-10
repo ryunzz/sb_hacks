@@ -13,7 +13,8 @@
         "scripting",
         "tabs",
         "storage",
-        "sidePanel"
+        "sidePanel",
+        "tabCapture"
     ],
     "host_permissions": [
         "<all_urls>"
