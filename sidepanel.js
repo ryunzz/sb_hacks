@@ -11,6 +11,9 @@ const sendBtn = document.getElementById('sendBtn');
 const statusEl = document.getElementById('status');
 const settingsBtn = document.getElementById('settingsBtn');
 const muteBtn = document.getElementById('muteBtn');
+const micPermissionModal = document.getElementById('micPermissionModal');
+const openMicSettingsBtn = document.getElementById('openMicSettings');
+const closeModalBtn = document.getElementById('closeModal');
 
 // State
 let isListening = false;
@@ -19,24 +22,96 @@ let deepgramSocket = null;
 let mediaRecorder = null;
 let audioStream = null;
 let deepgramApiKey = '';
+let selectedLanguage = 'en';
+let selectedVoice = 'aura-thalia-en';
+let currentAudioQueue = [];
+let isPlayingAudio = false;
+let fillerTimeout = null;
 
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
     await loadConfig();
     setupEventListeners();
+    setupOffscreenListeners();
 
     // Announce ready state for screen readers
     announceToScreenReader('Vision Agent is ready. Press and hold the microphone button to speak, or type your message.');
 });
 
 /**
+ * Setup listeners for offscreen document messages
+ */
+function setupOffscreenListeners() {
+    chrome.runtime.onMessage.addListener((message) => {
+        switch (message.type) {
+            case 'recording-started':
+                console.log('Recording started via offscreen');
+                break;
+
+            case 'transcript-result':
+                console.log('Transcript received:', message.transcript);
+                if (message.transcript) {
+                    handleUserInput(message.transcript);
+                }
+                setStatus('Ready to help');
+                break;
+
+            case 'recording-error':
+                console.error('Recording error:', message.error);
+                const errorMsg = message.error || 'Voice recognition failed. Please try again.';
+                // Replace newlines with line breaks for HTML display
+                const formattedError = errorMsg.replace(/\n/g, '<br>');
+                addMessage('assistant', formattedError, false, true);
+                
+                // If permission was denied, show request permission button
+                if (message.showSettingsLink || (errorMsg && errorMsg.includes('permission'))) {
+                    setTimeout(() => {
+                        const lastMessage = messagesContainer.lastElementChild;
+                        if (lastMessage) {
+                            const requestBtn = document.createElement('button');
+                            requestBtn.textContent = '🔧 Request Microphone Permission';
+                            requestBtn.className = 'quick-btn';
+                            requestBtn.style.marginTop = '12px';
+                            requestBtn.style.width = '100%';
+                            requestBtn.onclick = () => {
+                                chrome.tabs.create({ 
+                                    url: chrome.runtime.getURL('requestPermissions.html'),
+                                    active: true
+                                });
+                            };
+                            lastMessage.querySelector('.message-content').appendChild(requestBtn);
+                        }
+                    }, 100);
+                }
+                
+                setStatus('Ready to help');
+                break;
+                
+            case 'microphone-permission-granted':
+                // Permission was granted in the requestPermissions page
+                console.log('Microphone permission granted');
+                addMessage('assistant', '✅ Microphone permission granted! You can now use voice input.');
+                speak('Microphone permission granted. You can now use voice input.');
+                break;
+        }
+    });
+}
+
+/**
  * Load configuration from storage
  */
 async function loadConfig() {
     try {
-        const config = await chrome.storage.local.get(['deepgramApiKey', 'voiceMuted']);
+        const config = await chrome.storage.local.get([
+            'deepgramApiKey',
+            'voiceMuted',
+            'language',
+            'voiceModel'
+        ]);
         deepgramApiKey = config.deepgramApiKey || '';
         isMuted = config.voiceMuted || false;
+        selectedLanguage = config.language || 'en';
+        selectedVoice = config.voiceModel || 'aura-thalia-en';
         updateMuteButton();
     } catch (error) {
         console.error('Failed to load config:', error);
@@ -95,16 +170,77 @@ function setupEventListeners() {
     // Mute toggle
     muteBtn.addEventListener('click', toggleMute);
 
+    // Modal buttons
+    openMicSettingsBtn.addEventListener('click', () => {
+        // Open mic permission page in a new tab where Chrome allows proper permission requests
+        // Based on: https://github.com/justinmann/sidepanel-audio-issue
+        chrome.tabs.create({
+            url: chrome.runtime.getURL('requestPermissions.html'),
+            active: true
+        });
+        hideMicPermissionModal();
+    });
+
+    closeModalBtn.addEventListener('click', hideMicPermissionModal);
+
     // Listen for config updates
     chrome.storage.onChanged.addListener((changes) => {
         if (changes.deepgramApiKey) {
             deepgramApiKey = changes.deepgramApiKey.newValue || '';
         }
+        if (changes.language) {
+            selectedLanguage = changes.language.newValue || 'en';
+        }
+        if (changes.voiceModel) {
+            selectedVoice = changes.voiceModel.newValue || 'aura-thalia-en';
+        }
     });
 }
 
 /**
- * Start listening with Deepgram
+ * Check if microphone permission is granted
+ * Based on: https://github.com/justinmann/sidepanel-audio-issue
+ */
+async function checkMicrophonePermission() {
+    try {
+        // Try to query permission state (may not be available in all contexts)
+        if (navigator.permissions && navigator.permissions.query) {
+            const result = await navigator.permissions.query({ name: 'microphone' });
+            return result.state === 'granted';
+        }
+        
+        // If Permissions API not available, try a test getUserMedia call
+        // This will fail silently if permission is denied
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            stream.getTracks().forEach(track => track.stop());
+            return true;
+        } catch (e) {
+            return false;
+        }
+    } catch (error) {
+        console.error('Error checking microphone permission:', error);
+        return false;
+    }
+}
+
+/**
+ * Request microphone permission by opening requestPermissions page
+ */
+async function requestMicrophonePermission() {
+    // Open the requestPermissions page in a new tab
+    // This must be done in a regular tab, not the sidepanel
+    chrome.tabs.create({
+        url: chrome.runtime.getURL('requestPermissions.html'),
+        active: true
+    });
+    
+    addMessage('assistant', 'Opening microphone permission page. Please allow microphone access when prompted, then try again.');
+    speak('Opening microphone permission page. Please allow microphone access when prompted.');
+}
+
+/**
+ * Start listening via offscreen document
  */
 async function startListening() {
     if (isListening) return;
@@ -116,71 +252,52 @@ async function startListening() {
         return;
     }
 
+    // Check microphone permission first
+    // Based on: https://github.com/justinmann/sidepanel-audio-issue
+    const hasPermission = await checkMicrophonePermission();
+    if (!hasPermission) {
+        addMessage('assistant', 'Microphone permission is required. Opening permission request page...');
+        speak('Microphone permission is required. Opening permission request page.');
+        await requestMicrophonePermission();
+        return;
+    }
+
     isListening = true;
     voiceBtn.classList.add('listening');
     voiceBtn.querySelector('.voice-text').textContent = 'Listening...';
     setStatus('Listening...');
 
     try {
-        // Get microphone access
-        audioStream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-                channelCount: 1,
-                sampleRate: 16000
-            }
+        // Request recording via background script (which uses offscreen document)
+        const response = await chrome.runtime.sendMessage({
+            type: 'start-recording',
+            language: selectedLanguage
         });
 
-        // Connect to Deepgram WebSocket
-        deepgramSocket = new WebSocket(
-            'wss://api.deepgram.com/v1/listen?model=nova-2&punctuate=true&smart_format=true',
-            ['token', deepgramApiKey]
-        );
-
-        let transcript = '';
-
-        deepgramSocket.onopen = () => {
-            console.log('Deepgram connected');
-
-            // Start MediaRecorder
-            mediaRecorder = new MediaRecorder(audioStream, {
-                mimeType: 'audio/webm;codecs=opus'
-            });
-
-            mediaRecorder.ondataavailable = (event) => {
-                if (event.data.size > 0 && deepgramSocket?.readyState === WebSocket.OPEN) {
-                    deepgramSocket.send(event.data);
-                }
-            };
-
-            mediaRecorder.start(250); // Send chunks every 250ms
-        };
-
-        deepgramSocket.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            if (data.channel?.alternatives?.[0]?.transcript) {
-                const newTranscript = data.channel.alternatives[0].transcript;
-                if (data.is_final) {
-                    transcript += newTranscript + ' ';
-                }
-            }
-        };
-
-        deepgramSocket.onclose = () => {
-            console.log('Deepgram disconnected');
-            if (transcript.trim()) {
-                handleUserInput(transcript.trim());
-            }
-        };
-
-        deepgramSocket.onerror = (error) => {
-            console.error('Deepgram error:', error);
-            addMessage('assistant', 'Voice recognition failed. Please try again or type your message.');
-            stopListening();
-        };
+        if (!response || !response.success) {
+            throw new Error(response?.error || 'Failed to start recording');
+        }
 
     } catch (error) {
-        console.error('Microphone access error:', error);
-        addMessage('assistant', 'Could not access microphone. Please check your permissions.');
+        console.error('Start recording error:', error);
+        const errorMsg = error.message || 'Could not access microphone. Please check your permissions.';
+        addMessage('assistant', errorMsg);
+        
+        // If permission error, offer to request permission again
+        if (error.message && (error.message.includes('permission') || error.message.includes('NotAllowed'))) {
+            setTimeout(() => {
+                const retryBtn = document.createElement('button');
+                retryBtn.textContent = '🔧 Request Microphone Permission';
+                retryBtn.className = 'quick-btn';
+                retryBtn.style.marginTop = '8px';
+                retryBtn.onclick = () => requestMicrophonePermission();
+                const lastMessage = messagesContainer.lastElementChild;
+                if (lastMessage) {
+                    lastMessage.querySelector('.message-content').appendChild(retryBtn);
+                }
+            }, 100);
+        }
+        
         stopListening();
     }
 }
@@ -196,22 +313,8 @@ function stopListening() {
     voiceBtn.querySelector('.voice-text').textContent = 'Hold to Speak';
     setStatus('Processing...');
 
-    // Stop media recorder
-    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-        mediaRecorder.stop();
-    }
-
-    // Close Deepgram connection
-    if (deepgramSocket) {
-        deepgramSocket.close();
-        deepgramSocket = null;
-    }
-
-    // Stop audio stream
-    if (audioStream) {
-        audioStream.getTracks().forEach(track => track.stop());
-        audioStream = null;
-    }
+    // Tell background/offscreen to stop recording
+    chrome.runtime.sendMessage({ type: 'stop-recording' });
 }
 
 /**
@@ -235,11 +338,34 @@ async function handleUserInput(input) {
     // Show loading state
     const loadingId = addMessage('assistant', '...', true);
 
+    // Play conversational filler after 0.4 seconds for immediate responsiveness
+    const fillerPhrases = [
+        "Let me think about that for a moment...",
+        "Hmm, interesting question. Give me a second...",
+        "Let me analyze this for you...",
+        "Just processing that...",
+        "One moment while I look into this..."
+    ];
+
+    fillerTimeout = setTimeout(() => {
+        const randomFiller = fillerPhrases[Math.floor(Math.random() * fillerPhrases.length)];
+        speak(randomFiller);
+    }, 400);
+
     try {
         const response = await chrome.runtime.sendMessage({
             type: 'message',
             content: input
         });
+
+        // Clear the filler timeout
+        if (fillerTimeout) {
+            clearTimeout(fillerTimeout);
+            fillerTimeout = null;
+        }
+
+        // Stop any ongoing filler speech
+        stopAllAudio();
 
         // Remove loading message
         removeMessage(loadingId);
@@ -255,6 +381,14 @@ async function handleUserInput(input) {
         setStatus('Ready to help');
     } catch (error) {
         console.error('Message error:', error);
+
+        // Clear the filler timeout
+        if (fillerTimeout) {
+            clearTimeout(fillerTimeout);
+            fillerTimeout = null;
+        }
+
+        stopAllAudio();
         removeMessage(loadingId);
         addMessage('assistant', 'Something went wrong. Please try again.');
         setStatus('Ready to help');
@@ -280,7 +414,7 @@ async function handleQuickAction(action) {
 /**
  * Add message to chat
  */
-function addMessage(role, content, isLoading = false) {
+function addMessage(role, content, isLoading = false, isHTML = false) {
     const id = 'msg-' + Date.now();
     const messageEl = document.createElement('div');
     messageEl.className = `message ${role}${isLoading ? ' loading' : ''}`;
@@ -288,7 +422,11 @@ function addMessage(role, content, isLoading = false) {
 
     const contentEl = document.createElement('div');
     contentEl.className = 'message-content';
-    contentEl.textContent = content;
+    if (isHTML) {
+        contentEl.innerHTML = content;
+    } else {
+        contentEl.textContent = content;
+    }
 
     messageEl.appendChild(contentEl);
     messagesContainer.appendChild(messageEl);
@@ -315,31 +453,93 @@ function setStatus(text) {
 }
 
 /**
- * Text-to-speech
+ * Text-to-speech using Deepgram Aura (Thalia voice)
  */
-function speak(text) {
-    if (isMuted) return;
+async function speak(text) {
+    if (isMuted || !text.trim()) return;
 
-    // Cancel any ongoing speech
-    speechSynthesis.cancel();
+    // Stop any ongoing speech
+    stopAllAudio();
 
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = 1.0;
-    utterance.pitch = 1.0;
-    utterance.volume = 1.0;
-
-    // Try to use a nice voice
-    const voices = speechSynthesis.getVoices();
-    const preferredVoice = voices.find(v =>
-        v.name.includes('Samantha') ||
-        v.name.includes('Google') ||
-        v.name.includes('Microsoft')
-    );
-    if (preferredVoice) {
-        utterance.voice = preferredVoice;
+    if (!deepgramApiKey) {
+        console.warn('No Deepgram API key for TTS');
+        return;
     }
 
-    speechSynthesis.speak(utterance);
+    try {
+        // Validate API key
+        if (!deepgramApiKey || deepgramApiKey.trim() === '') {
+            console.warn('No Deepgram API key for TTS');
+            return;
+        }
+
+        const response = await fetch('https://api.deepgram.com/v1/speak?model=' + selectedVoice, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Token ${deepgramApiKey}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                text: text
+            })
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error('TTS API error:', response.status, errorText);
+            
+            let errorMessage = 'TTS request failed';
+            if (response.status === 401) {
+                errorMessage = 'Deepgram API key is invalid. Please check your settings.';
+            } else if (response.status === 403) {
+                errorMessage = 'Deepgram API key does not have TTS permissions.';
+            } else if (response.status >= 500) {
+                errorMessage = 'Deepgram service is temporarily unavailable. Please try again later.';
+            }
+            
+            throw new Error(errorMessage);
+        }
+
+        const audioBlob = await response.blob();
+        const audioUrl = URL.createObjectURL(audioBlob);
+
+        // Create and play audio
+        const audio = new Audio(audioUrl);
+        currentAudioQueue.push(audio);
+
+        audio.onended = () => {
+            URL.revokeObjectURL(audioUrl);
+            currentAudioQueue = currentAudioQueue.filter(a => a !== audio);
+            isPlayingAudio = currentAudioQueue.length > 0;
+        };
+
+        audio.onerror = (error) => {
+            console.error('Audio playback error:', error);
+            URL.revokeObjectURL(audioUrl);
+            currentAudioQueue = currentAudioQueue.filter(a => a !== audio);
+            isPlayingAudio = currentAudioQueue.length > 0;
+        };
+
+        isPlayingAudio = true;
+        await audio.play();
+
+    } catch (error) {
+        console.error('TTS error:', error);
+        // Don't show error to user for TTS failures - just log it
+        // The text message will still be displayed
+    }
+}
+
+/**
+ * Stop all ongoing audio playback
+ */
+function stopAllAudio() {
+    currentAudioQueue.forEach(audio => {
+        audio.pause();
+        audio.currentTime = 0;
+    });
+    currentAudioQueue = [];
+    isPlayingAudio = false;
 }
 
 /**
@@ -351,7 +551,7 @@ function toggleMute() {
     updateMuteButton();
 
     if (isMuted) {
-        speechSynthesis.cancel();
+        stopAllAudio();
         announceToScreenReader('Voice output muted');
     } else {
         announceToScreenReader('Voice output enabled');
@@ -384,7 +584,17 @@ function announceToScreenReader(message) {
     setTimeout(() => announcement.remove(), 1000);
 }
 
-// Load voices when available
-speechSynthesis.onvoiceschanged = () => {
-    speechSynthesis.getVoices();
-};
+/**
+ * Show microphone permission modal
+ */
+function showMicPermissionModal() {
+    micPermissionModal.classList.add('visible');
+    announceToScreenReader('Microphone permission required. A dialog has opened with instructions.');
+}
+
+/**
+ * Hide microphone permission modal
+ */
+function hideMicPermissionModal() {
+    micPermissionModal.classList.remove('visible');
+}

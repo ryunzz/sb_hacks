@@ -99,6 +99,33 @@
             border-color: var(--accent);
         }
 
+        select.select-input {
+            width: 100%;
+            padding: 14px 16px;
+            background: var(--bg-primary);
+            border: 2px solid var(--border);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-size: 16px;
+            cursor: pointer;
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23b3b3b3' d='M6 9L1 4h10z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 16px center;
+            padding-right: 40px;
+        }
+
+        select.select-input:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
+        select.select-input option {
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            padding: 12px;
+        }
+
         .help-text {
             font-size: 13px;
             color: var(--text-secondary);
@@ -257,6 +284,55 @@
                     <p class="help-text">
                         Get your API key from
                         <a href="https://console.deepgram.com/" target="_blank">Deepgram Console</a>
+                    </p>
+                </div>
+
+                <div class="form-group">
+                    <label for="language">
+                        Language
+                    </label>
+                    <select id="language" class="select-input">
+                        <option value="en">English</option>
+                        <option value="es">Spanish</option>
+                        <option value="fr">French</option>
+                        <option value="de">German</option>
+                        <option value="it">Italian</option>
+                        <option value="pt">Portuguese</option>
+                        <option value="nl">Dutch</option>
+                        <option value="pl">Polish</option>
+                        <option value="ru">Russian</option>
+                        <option value="ja">Japanese</option>
+                        <option value="ko">Korean</option>
+                        <option value="zh">Chinese</option>
+                        <option value="hi">Hindi</option>
+                        <option value="ar">Arabic</option>
+                    </select>
+                    <p class="help-text">
+                        Select your preferred language for voice input and output
+                    </p>
+                </div>
+
+                <div class="form-group">
+                    <label for="voiceModel">
+                        Voice Model
+                    </label>
+                    <select id="voiceModel" class="select-input">
+                        <option value="aura-thalia-en">Thalia (English) - Warm, Conversational</option>
+                        <option value="aura-asteria-en">Asteria (English) - Professional, Clear</option>
+                        <option value="aura-luna-en">Luna (English) - Friendly, Upbeat</option>
+                        <option value="aura-stella-en">Stella (English) - Calm, Soothing</option>
+                        <option value="aura-athena-en">Athena (English) - Authoritative, Confident</option>
+                        <option value="aura-hera-en">Hera (English) - Mature, Sophisticated</option>
+                        <option value="aura-orion-en">Orion (English, Male) - Deep, Strong</option>
+                        <option value="aura-arcas-en">Arcas (English, Male) - Natural, Versatile</option>
+                        <option value="aura-perseus-en">Perseus (English, Male) - Professional, Clear</option>
+                        <option value="aura-angus-en">Angus (English, Irish) - Warm, Friendly</option>
+                        <option value="aura-orpheus-en">Orpheus (English, Male) - Smooth, Engaging</option>
+                        <option value="aura-helios-en">Helios (English, Male) - Energetic, Vibrant</option>
+                        <option value="aura-zeus-en">Zeus (English, Male) - Commanding, Powerful</option>
+                    </select>
+                    <p class="help-text">
+                        Choose your preferred voice for the conversational agent (Thalia recommended)
                     </p>
                 </div>
             </div>

@@ -7,6 +7,8 @@ const form = document.getElementById('settingsForm');
 const geminiKeyInput = document.getElementById('geminiKey');
 const deepgramKeyInput = document.getElementById('deepgramKey');
 const twelveLabsKeyInput = document.getElementById('twelveLabsKey');
+const languageSelect = document.getElementById('language');
+const voiceModelSelect = document.getElementById('voiceModel');
 const saveBtn = document.getElementById('saveBtn');
 const statusEl = document.getElementById('status');
 
@@ -16,12 +18,16 @@ document.addEventListener('DOMContentLoaded', async () => {
         const config = await chrome.storage.local.get([
             'geminiApiKey',
             'deepgramApiKey',
-            'twelveLabsApiKey'
+            'twelveLabsApiKey',
+            'language',
+            'voiceModel'
         ]);
 
         geminiKeyInput.value = config.geminiApiKey || '';
         deepgramKeyInput.value = config.deepgramApiKey || '';
         twelveLabsKeyInput.value = config.twelveLabsApiKey || '';
+        languageSelect.value = config.language || 'en';
+        voiceModelSelect.value = config.voiceModel || 'aura-thalia-en';
     } catch (error) {
         console.error('Failed to load settings:', error);
     }
@@ -38,7 +44,9 @@ form.addEventListener('submit', async (e) => {
         const config = {
             geminiApiKey: geminiKeyInput.value.trim(),
             deepgramApiKey: deepgramKeyInput.value.trim(),
-            twelveLabsApiKey: twelveLabsKeyInput.value.trim()
+            twelveLabsApiKey: twelveLabsKeyInput.value.trim(),
+            language: languageSelect.value,
+            voiceModel: voiceModelSelect.value
         };
 
         // Save to storage

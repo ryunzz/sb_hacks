@@ -77,6 +77,29 @@
         </footer>
     </div>
 
+    <!-- Microphone Permission Modal -->
+    <div class="modal-overlay" id="micPermissionModal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+        <div class="modal">
+            <h2 id="modalTitle">🎤 Microphone Access Required</h2>
+            <p class="modal-text">
+                Chrome Extensions need special permission for microphone access.
+                Click below to open a permission window:
+            </p>
+            <div class="modal-buttons">
+                <button class="modal-btn primary" id="openMicSettings">
+                    🎤 Grant Microphone Access
+                </button>
+                <button class="modal-btn secondary" id="closeModal">
+                    Maybe Later
+                </button>
+            </div>
+            <p class="modal-hint">
+                A popup will appear - click "Allow" when asked for microphone permission.
+                You can also type messages using the text input below.
+            </p>
+        </div>
+    </div>
+
     <script src="sidepanel.js" type="module"></script>
 </body>
 

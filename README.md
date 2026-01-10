@@ -8,7 +8,9 @@ Vision Agent is a Chrome extension that helps visually impaired users navigate t
 
 ### 🎤 Voice Interaction
 - **Push-to-talk** voice input using Deepgram's Nova-2 model
-- **Text-to-speech** responses using Web Speech API
+- **Natural conversational TTS** using Deepgram Aura voices (Thalia recommended)
+- **Multi-language support** - 14+ languages including English, Spanish, French, German, Japanese, and more
+- **Conversational filler** - Natural "thinking" responses while processing
 - Natural language conversation with context awareness
 
 ### 👁️ Screen Understanding
@@ -47,6 +49,7 @@ Vision Agent is a Chrome extension that helps visually impaired users navigate t
    - Click the Vision Agent icon in Chrome
    - Click "⚙️ Settings" in the side panel
    - Enter your Gemini and Deepgram API keys
+   - (Optional) Select your preferred language and voice
    - Click "Save Settings"
 
 4. **Start using**
@@ -84,7 +87,7 @@ sb_hacks/
 
 - **AI**: Google Gemini 2.0 Flash (vision + chat)
 - **Speech-to-Text**: Deepgram Nova-2
-- **Text-to-Speech**: Web Speech API
+- **Text-to-Speech**: Deepgram Aura (Thalia voice & 12 other voices)
 - **Platform**: Chrome Extension Manifest V3
 
 ## 🎯 Use Cases

@@ -13,11 +13,8 @@ let config = {
     deepgramApiKey: ''
 };
 
-// Initialize on installation
-chrome.runtime.onInstalled.addListener(async () => {
-    console.log('Vision Agent installed');
-
-    // Load saved API keys
+// Load config from storage
+async function loadConfig() {
     const stored = await chrome.storage.local.get(['geminiApiKey', 'deepgramApiKey']);
     config.geminiApiKey = stored.geminiApiKey || '';
     config.deepgramApiKey = stored.deepgramApiKey || '';
@@ -25,11 +22,42 @@ chrome.runtime.onInstalled.addListener(async () => {
     if (config.geminiApiKey) {
         initGemini();
     }
+    
+    console.log('Config loaded:', {
+        hasGeminiKey: !!config.geminiApiKey,
+        hasDeepgramKey: !!config.deepgramApiKey,
+        deepgramKeyLength: config.deepgramApiKey ? config.deepgramApiKey.length : 0
+    });
+}
+
+// Initialize on installation
+chrome.runtime.onInstalled.addListener(async () => {
+    console.log('Vision Agent installed');
+    await loadConfig();
 
     // Open side panel when extension icon is clicked
     chrome.sidePanel
         .setPanelBehavior({ openPanelOnActionClick: true })
         .catch((error) => console.error(error));
+});
+
+// Also load config on startup (in case extension was reloaded)
+loadConfig();
+
+// Listen for storage changes to keep config in sync
+chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName === 'local') {
+        if (changes.geminiApiKey) {
+            config.geminiApiKey = changes.geminiApiKey.newValue || '';
+            if (config.geminiApiKey) {
+                initGemini();
+            }
+        }
+        if (changes.deepgramApiKey) {
+            config.deepgramApiKey = changes.deepgramApiKey.newValue || '';
+            console.log('Deepgram API key updated in config');
+        }
+    }
 });
 
 // Initialize Gemini client
@@ -71,10 +99,143 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             });
             return true;
 
+        case 'start-recording':
+            // Create offscreen document and start recording
+            setupOffscreenDocument().then(async () => {
+                // Ensure offscreen is ready
+                if (!offscreenReady) {
+                    await new Promise(resolve => setTimeout(resolve, 200));
+                }
+                
+                // Always fetch the latest API key from storage (in case it was updated in settings)
+                const stored = await chrome.storage.local.get(['deepgramApiKey']);
+                const currentDeepgramApiKey = stored.deepgramApiKey || config.deepgramApiKey || '';
+                
+                // Update config for future use
+                if (stored.deepgramApiKey) {
+                    config.deepgramApiKey = stored.deepgramApiKey;
+                }
+                
+                // Log API key status for debugging
+                console.log('Background: Preparing to send API key to offscreen:', {
+                    hasStoredKey: !!stored.deepgramApiKey,
+                    hasConfigKey: !!config.deepgramApiKey,
+                    currentKeyLength: currentDeepgramApiKey ? currentDeepgramApiKey.length : 0,
+                    currentKeyPreview: currentDeepgramApiKey ? currentDeepgramApiKey.substring(0, 10) + '...' : 'none'
+                });
+                
+                // Check if API key exists
+                if (!currentDeepgramApiKey || currentDeepgramApiKey.trim() === '') {
+                    console.error('Background: Deepgram API key is missing!');
+                    sendResponse({ 
+                        success: false, 
+                        error: 'Deepgram API key is required. Please configure it in settings.' 
+                    });
+                    return;
+                }
+                
+                // Send message to offscreen document
+                // The offscreen document will send 'recording-started' or 'recording-error' messages
+                // which the sidepanel already listens for
+                const messageToSend = {
+                    type: 'start-recording',
+                    deepgramApiKey: currentDeepgramApiKey,
+                    language: message.language || 'en'
+                };
+                
+                console.log('Background: Sending message to offscreen:', {
+                    type: messageToSend.type,
+                    hasApiKey: !!messageToSend.deepgramApiKey,
+                    apiKeyLength: messageToSend.deepgramApiKey ? messageToSend.deepgramApiKey.length : 0,
+                    language: messageToSend.language
+                });
+                
+                chrome.runtime.sendMessage(messageToSend).catch(error => {
+                    console.error('Failed to send message to offscreen:', error);
+                    sendResponse({ success: false, error: 'Failed to communicate with offscreen document' });
+                });
+                
+                // Respond immediately - actual result will come via 'recording-started' or 'recording-error' messages
+                sendResponse({ success: true });
+            }).catch(error => {
+                console.error('Failed to setup offscreen document:', error);
+                sendResponse({ success: false, error: error.message });
+            });
+            return true;
+
+        case 'stop-recording':
+            // Forward to offscreen document
+            chrome.runtime.sendMessage({ type: 'stop-recording' });
+            sendResponse({ success: true });
+            break;
+
+        case 'transcript-result':
+        case 'recording-started':
+        case 'recording-error':
+        case 'microphone-permission-granted':
+            // Forward these messages from offscreen/other pages to all extension pages
+            // The sidepanel will pick them up
+            break;
+
         default:
             sendResponse({ error: 'Unknown message type' });
     }
 });
+
+/**
+ * Create offscreen document for audio capture
+ */
+let creatingOffscreen = null;
+let offscreenReady = false;
+
+// Listen for offscreen ready signal
+chrome.runtime.onMessage.addListener((message) => {
+    if (message.type === 'offscreen-ready') {
+        offscreenReady = true;
+        console.log('Offscreen document is ready');
+    }
+});
+
+async function setupOffscreenDocument() {
+    const offscreenUrl = chrome.runtime.getURL('offscreen.html');
+
+    // Check if offscreen document already exists
+    const existingContexts = await chrome.runtime.getContexts({
+        contextTypes: ['OFFSCREEN_DOCUMENT'],
+        documentUrls: [offscreenUrl]
+    });
+
+    if (existingContexts.length > 0) {
+        offscreenReady = true;
+        return; // Already exists
+    }
+
+    // Create offscreen document (avoid race conditions)
+    if (creatingOffscreen) {
+        await creatingOffscreen;
+    } else {
+        offscreenReady = false;
+        creatingOffscreen = chrome.offscreen.createDocument({
+            url: offscreenUrl,
+            reasons: ['USER_MEDIA'],
+            justification: 'Recording audio from microphone for voice input'
+        });
+        await creatingOffscreen;
+        creatingOffscreen = null;
+        
+        // Wait for offscreen document to signal it's ready (with timeout)
+        let attempts = 0;
+        while (!offscreenReady && attempts < 50) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+            attempts++;
+        }
+        
+        if (!offscreenReady) {
+            console.warn('Offscreen document did not signal ready, proceeding anyway');
+            offscreenReady = true; // Proceed anyway
+        }
+    }
+}
 
 /**
  * Update configuration (API keys)
@@ -85,6 +246,11 @@ async function updateConfig(newConfig) {
 
     if (config.geminiApiKey) {
         initGemini();
+    }
+    
+    // Log API key update (without exposing the key)
+    if (newConfig.deepgramApiKey !== undefined) {
+        console.log('Deepgram API key updated:', newConfig.deepgramApiKey ? `Length: ${newConfig.deepgramApiKey.length}` : 'Removed');
     }
 }
 
