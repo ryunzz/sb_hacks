@@ -115,3 +115,9 @@ MIT License - feel free to modify and distribute!
 ---
 
 Built with ❤️ for accessibility
+
+blind.CUM
+
+bcum.ai
+
+blind computer use model
