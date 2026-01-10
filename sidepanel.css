@@ -172,6 +172,22 @@ body {
     }
 }
 
+/* Interim message styling - for real-time transcript updates */
+.message.interim {
+    opacity: 0.7;
+    border: 2px dashed var(--accent);
+    animation: pulseInterim 1.5s ease-in-out infinite;
+}
+
+@keyframes pulseInterim {
+    0%, 100% {
+        opacity: 0.7;
+    }
+    50% {
+        opacity: 0.9;
+    }
+}
+
 /* Input area */
 .input-area {
     padding-top: var(--space-md);

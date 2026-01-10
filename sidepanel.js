@@ -23,10 +23,12 @@ let mediaRecorder = null;
 let audioStream = null;
 let deepgramApiKey = '';
 let selectedLanguage = 'en';
-let selectedVoice = 'aura-thalia-en';
+let selectedVoice = 'aura-asteria-en';
 let currentAudioQueue = [];
 let isPlayingAudio = false;
 let fillerTimeout = null;
+let currentUserMessageId = null; // Track the current user message being spoken
+let currentLoadingMessageId = null; // Track the loading message for responses
 
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
@@ -35,7 +37,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     setupOffscreenListeners();
 
     // Announce ready state for screen readers
-    announceToScreenReader('Vision Agent is ready. Press and hold the microphone button to speak, or type your message.');
+    announceToScreenReader('Vision Agent is ready. Click the microphone button to start recording, or type your message.');
 });
 
 /**
@@ -48,12 +50,101 @@ function setupOffscreenListeners() {
                 console.log('Recording started via offscreen');
                 break;
 
-            case 'transcript-result':
-                console.log('Transcript received:', message.transcript);
+            case 'transcript-update':
+                // Real-time transcript updates (interim and final)
+                console.log('Transcript update received:', message.transcript, 'isFinal:', message.isFinal);
                 if (message.transcript) {
-                    handleUserInput(message.transcript);
+                    // Update text input in real-time as user speaks
+                    textInput.value = message.transcript;
+                    
+                    // Show visual feedback that we're receiving audio
+                    if (!message.isFinal) {
+                        textInput.style.borderColor = '#4f9eff';
+                        textInput.style.borderWidth = '2px';
+                    } else {
+                        textInput.style.borderColor = '#10b981';
+                        textInput.style.borderWidth = '2px';
+                    }
+                    
+                    // Show transcript in messages area in real-time
+                    if (!currentUserMessageId) {
+                        // Create new user message for the transcript
+                        currentUserMessageId = addMessage('user', message.transcript, false);
+                    } else {
+                        // Update existing user message with latest transcript
+                        const messageEl = document.getElementById(currentUserMessageId);
+                        if (messageEl) {
+                            const contentEl = messageEl.querySelector('.message-content');
+                            if (contentEl) {
+                                contentEl.textContent = message.transcript;
+                                // Add visual indicator for interim results
+                                if (!message.isFinal) {
+                                    messageEl.classList.add('interim');
+                                } else {
+                                    messageEl.classList.remove('interim');
+                                }
+                                // Scroll to bottom
+                                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                            }
+                        }
+                    }
                 }
-                setStatus('Ready to help');
+                break;
+
+            case 'transcript-result':
+                // Final transcript when recording stops - auto-send the message
+                console.log('Final transcript received:', message.transcript);
+                
+                // Reset border styling
+                textInput.style.borderColor = '';
+                textInput.style.borderWidth = '';
+                
+                // Reset listening state
+                isListening = false;
+                voiceBtn.classList.remove('listening');
+                voiceBtn.querySelector('.voice-text').textContent = 'Start Recording';
+                voiceBtn.setAttribute('aria-label', 'Start recording');
+                voiceBtn.setAttribute('title', 'Click to start recording');
+                
+                if (message.transcript && message.transcript.trim()) {
+                    const finalText = message.transcript.trim();
+                    
+                    // Update the user message with final transcript (remove interim styling)
+                    if (currentUserMessageId) {
+                        const messageEl = document.getElementById(currentUserMessageId);
+                        if (messageEl) {
+                            const contentEl = messageEl.querySelector('.message-content');
+                            if (contentEl) {
+                                contentEl.textContent = finalText;
+                                messageEl.classList.remove('interim');
+                            }
+                        }
+                    } else {
+                        // No existing message, create one
+                        currentUserMessageId = addMessage('user', finalText, false);
+                    }
+                    
+                    // Clear the input
+                    textInput.value = '';
+                    
+                    // Store the message ID before sending
+                    const messageIdToSend = currentUserMessageId;
+                    
+                    // Reset user message tracking BEFORE sending (to prevent conflicts)
+                    currentUserMessageId = null;
+                    
+                    // Auto-send the message immediately
+                    console.log('Auto-sending transcript:', finalText);
+                    handleUserInput(finalText, messageIdToSend);
+                    setStatus('Message sent');
+                } else {
+                    // No transcript, remove the user message if it exists
+                    if (currentUserMessageId) {
+                        removeMessage(currentUserMessageId);
+                        currentUserMessageId = null;
+                    }
+                    setStatus('Ready to help');
+                }
                 break;
 
             case 'recording-error':
@@ -111,7 +202,9 @@ async function loadConfig() {
         deepgramApiKey = config.deepgramApiKey || '';
         isMuted = config.voiceMuted || false;
         selectedLanguage = config.language || 'en';
-        selectedVoice = config.voiceModel || 'aura-thalia-en';
+        // Fix invalid voice model - migrate from old config
+        const storedVoice = config.voiceModel || 'aura-asteria-en';
+        selectedVoice = (storedVoice === 'aura-thalia-en') ? 'aura-asteria-en' : storedVoice;
         updateMuteButton();
     } catch (error) {
         console.error('Failed to load config:', error);
@@ -122,26 +215,24 @@ async function loadConfig() {
  * Setup event listeners
  */
 function setupEventListeners() {
-    // Voice button - push to talk
-    voiceBtn.addEventListener('mousedown', startListening);
-    voiceBtn.addEventListener('mouseup', stopListening);
-    voiceBtn.addEventListener('mouseleave', stopListening);
-    voiceBtn.addEventListener('touchstart', (e) => {
-        e.preventDefault();
-        startListening();
-    });
-    voiceBtn.addEventListener('touchend', stopListening);
-
-    // Keyboard support for voice button
-    voiceBtn.addEventListener('keydown', (e) => {
-        if (e.code === 'Space' && !isListening) {
-            e.preventDefault();
+    // Voice button - click to start/stop recording
+    voiceBtn.addEventListener('click', () => {
+        if (isListening) {
+            stopListening();
+        } else {
             startListening();
         }
     });
-    voiceBtn.addEventListener('keyup', (e) => {
-        if (e.code === 'Space') {
-            stopListening();
+
+    // Keyboard support for voice button (Space or Enter to toggle)
+    voiceBtn.addEventListener('keydown', (e) => {
+        if (e.code === 'Space' || e.code === 'Enter') {
+            e.preventDefault();
+            if (isListening) {
+                stopListening();
+            } else {
+                startListening();
+            }
         }
     });
 
@@ -192,7 +283,7 @@ function setupEventListeners() {
             selectedLanguage = changes.language.newValue || 'en';
         }
         if (changes.voiceModel) {
-            selectedVoice = changes.voiceModel.newValue || 'aura-thalia-en';
+            selectedVoice = changes.voiceModel.newValue || 'aura-asteria-en';
         }
     });
 }
@@ -264,8 +355,19 @@ async function startListening() {
 
     isListening = true;
     voiceBtn.classList.add('listening');
-    voiceBtn.querySelector('.voice-text').textContent = 'Listening...';
-    setStatus('Listening...');
+    voiceBtn.querySelector('.voice-text').textContent = 'Stop Recording';
+    voiceBtn.setAttribute('aria-label', 'Stop recording');
+    voiceBtn.setAttribute('title', 'Click to stop recording');
+    
+    // Clear text input to prepare for new transcript
+    textInput.value = '';
+    textInput.style.borderColor = '';
+    textInput.style.borderWidth = '';
+    
+    // Reset user message tracking for new recording session
+    currentUserMessageId = null;
+    
+    setStatus('Listening... Speak now');
 
     try {
         // Request recording via background script (which uses offscreen document)
@@ -310,7 +412,9 @@ function stopListening() {
 
     isListening = false;
     voiceBtn.classList.remove('listening');
-    voiceBtn.querySelector('.voice-text').textContent = 'Hold to Speak';
+    voiceBtn.querySelector('.voice-text').textContent = 'Start Recording';
+    voiceBtn.setAttribute('aria-label', 'Start recording');
+    voiceBtn.setAttribute('title', 'Click to start recording');
     setStatus('Processing...');
 
     // Tell background/offscreen to stop recording
@@ -331,12 +435,18 @@ function sendTextMessage() {
 /**
  * Handle user input (from voice or text)
  */
-async function handleUserInput(input) {
-    addMessage('user', input);
+async function handleUserInput(input, existingUserMessageId = null) {
+    // Reset any voice-related state when switching to text mode
+    if (!existingUserMessageId) {
+        // This is a text input, not voice - reset voice state
+        currentUserMessageId = null;
+        addMessage('user', input);
+    }
+    
     setStatus('Thinking...');
 
-    // Show loading state
-    const loadingId = addMessage('assistant', '...', true);
+    // Show loading state with animated dots
+    currentLoadingMessageId = addMessage('assistant', '...', true);
 
     // Play conversational filler after 0.4 seconds for immediate responsiveness
     const fillerPhrases = [
@@ -353,10 +463,15 @@ async function handleUserInput(input) {
     }, 400);
 
     try {
+        console.log('Sending message to background:', input);
         const response = await chrome.runtime.sendMessage({
             type: 'message',
             content: input
         });
+
+        console.log('Response received from background:', response);
+        console.log('Response type:', response?.type, 'Response keys:', response ? Object.keys(response) : 'null');
+        console.log('Response message:', response?.message ? response.message.substring(0, 50) + '...' : 'undefined');
 
         // Clear the filler timeout
         if (fillerTimeout) {
@@ -367,18 +482,144 @@ async function handleUserInput(input) {
         // Stop any ongoing filler speech
         stopAllAudio();
 
-        // Remove loading message
-        removeMessage(loadingId);
+        // Update loading message with response instead of removing it
+        if (currentLoadingMessageId) {
+            const loadingEl = document.getElementById(currentLoadingMessageId);
+            if (loadingEl) {
+                loadingEl.classList.remove('loading');
+                const contentEl = loadingEl.querySelector('.message-content');
+                if (contentEl) {
+                    // We'll update this with the actual response below
+                }
+            }
+        }
+
+        // Check if response is valid
+        if (!response) {
+            console.error('No response received from background');
+            addMessage('assistant', 'No response received. Please check your API keys and try again.');
+            speak('No response received. Please check your API keys and try again.');
+            setStatus('Ready to help');
+            return;
+        }
 
         if (response.type === 'error') {
-            addMessage('assistant', response.message);
-            speak(response.message);
+            console.error('Error response received:', response);
+            console.error('Error message:', response.message);
+            const errorText = response.message || 'An error occurred. Please try again.';
+            // Update loading message with error
+            if (currentLoadingMessageId) {
+                const loadingEl = document.getElementById(currentLoadingMessageId);
+                if (loadingEl) {
+                    const contentEl = loadingEl.querySelector('.message-content');
+                    if (contentEl) {
+                        contentEl.textContent = errorText;
+                    }
+                }
+            } else {
+                addMessage('assistant', errorText);
+            }
+            if (response.message) {
+                speak(response.message);
+            }
+        } else if (response.type === 'response') {
+            const messageText = response.message || response.text || '';
+            if (messageText) {
+                console.log('Success response:', messageText.substring(0, 100));
+                // Update loading message with actual response
+                if (currentLoadingMessageId) {
+                    const loadingEl = document.getElementById(currentLoadingMessageId);
+                    if (loadingEl) {
+                        const contentEl = loadingEl.querySelector('.message-content');
+                        if (contentEl) {
+                            contentEl.textContent = messageText;
+                        }
+                    }
+                } else {
+                    addMessage('assistant', messageText);
+                }
+                speak(messageText);
+            } else {
+                console.error('Response type is "response" but no message field:', response);
+                const errorText = 'Received response but no message content.';
+                if (currentLoadingMessageId) {
+                    const loadingEl = document.getElementById(currentLoadingMessageId);
+                    if (loadingEl) {
+                        const contentEl = loadingEl.querySelector('.message-content');
+                        if (contentEl) {
+                            contentEl.textContent = errorText;
+                        }
+                    }
+                } else {
+                    addMessage('assistant', errorText);
+                }
+            }
         } else {
-            addMessage('assistant', response.message);
-            speak(response.message);
+            // Fallback: try to extract message from any response format
+            console.log('Response format check - type:', response.type, 'keys:', Object.keys(response));
+            
+            // Check if it's an error object without type
+            if (response.error) {
+                console.error('Error response without type field:', response);
+                const errorText = response.error || 'Something went wrong. Please try again.';
+                if (currentLoadingMessageId) {
+                    const loadingEl = document.getElementById(currentLoadingMessageId);
+                    if (loadingEl) {
+                        const contentEl = loadingEl.querySelector('.message-content');
+                        if (contentEl) {
+                            contentEl.textContent = errorText;
+                        }
+                    }
+                } else {
+                    addMessage('assistant', errorText);
+                }
+                speak(errorText);
+            } else if (response.forwarded) {
+                // This is a forwarded message, ignore it
+                console.log('Ignoring forwarded message');
+                if (currentLoadingMessageId) {
+                    removeMessage(currentLoadingMessageId);
+                    currentLoadingMessageId = null;
+                }
+                setStatus('Ready to help');
+            } else {
+                const messageText = response.message || response.text || response.content || (typeof response === 'string' ? response : '');
+                if (messageText) {
+                    console.log('Response (fallback):', messageText.substring(0, 100));
+                    if (currentLoadingMessageId) {
+                        const loadingEl = document.getElementById(currentLoadingMessageId);
+                        if (loadingEl) {
+                            const contentEl = loadingEl.querySelector('.message-content');
+                            if (contentEl) {
+                                contentEl.textContent = messageText;
+                            }
+                        }
+                    } else {
+                        addMessage('assistant', messageText);
+                    }
+                    speak(messageText);
+                } else {
+                    console.error('Could not extract message from response:', response);
+                    const errorText = 'I received a response but couldn\'t understand the format. Please try again.';
+                    if (currentLoadingMessageId) {
+                        const loadingEl = document.getElementById(currentLoadingMessageId);
+                        if (loadingEl) {
+                            const contentEl = loadingEl.querySelector('.message-content');
+                            if (contentEl) {
+                                contentEl.textContent = errorText;
+                            }
+                        }
+                    } else {
+                        addMessage('assistant', errorText);
+                    }
+                    speak(errorText);
+                }
+            }
         }
 
         setStatus('Ready to help');
+        // Reset loading message ID
+        currentLoadingMessageId = null;
     } catch (error) {
         console.error('Message error:', error);
 
@@ -389,9 +630,23 @@ async function handleUserInput(input) {
         }
 
         stopAllAudio();
-        removeMessage(loadingId);
-        addMessage('assistant', 'Something went wrong. Please try again.');
+        
+        // Update loading message with error
+        if (currentLoadingMessageId) {
+            const loadingEl = document.getElementById(currentLoadingMessageId);
+            if (loadingEl) {
+                const contentEl = loadingEl.querySelector('.message-content');
+                if (contentEl) {
+                    contentEl.textContent = `Something went wrong: ${error.message || 'Unknown error'}. Please try again.`;
+                }
+            }
+        } else {
+            removeMessage(currentLoadingMessageId);
+            addMessage('assistant', `Something went wrong: ${error.message || 'Unknown error'}. Please try again.`);
+        }
+        speak('Something went wrong. Please try again.');
         setStatus('Ready to help');
+        currentLoadingMessageId = null;
     }
 }
 
@@ -455,6 +710,55 @@ function setStatus(text) {
 /**
  * Text-to-speech using Deepgram Aura (Thalia voice)
  */
+/**
+ * Split text into chunks that are under the character limit, trying to split on sentence boundaries
+ */
+function chunkText(text, maxLength = 1900) {
+    // If text is already under limit, return as single chunk
+    if (text.length <= maxLength) {
+        return [text];
+    }
+
+    const chunks = [];
+    let remaining = text;
+
+    while (remaining.length > 0) {
+        if (remaining.length <= maxLength) {
+            chunks.push(remaining);
+            break;
+        }
+
+        // Try to find a good break point (sentence ending)
+        let chunk = remaining.substring(0, maxLength);
+        const lastPeriod = chunk.lastIndexOf('.');
+        const lastExclamation = chunk.lastIndexOf('!');
+        const lastQuestion = chunk.lastIndexOf('?');
+        const lastNewline = chunk.lastIndexOf('\n');
+        
+        // Find the best break point (prefer sentence endings, then newlines)
+        let breakPoint = Math.max(lastPeriod, lastExclamation, lastQuestion, lastNewline);
+        
+        // If we found a good break point (within last 200 chars), use it
+        if (breakPoint > maxLength - 200 && breakPoint > 0) {
+            chunk = remaining.substring(0, breakPoint + 1).trim();
+            remaining = remaining.substring(breakPoint + 1).trim();
+        } else {
+            // No good break point, just split at maxLength
+            chunk = remaining.substring(0, maxLength).trim();
+            remaining = remaining.substring(maxLength).trim();
+        }
+
+        if (chunk.length > 0) {
+            chunks.push(chunk);
+        }
+    }
+
+    return chunks;
+}
+
+/**
+ * Speak text using Deepgram TTS, chunking if necessary
+ */
 async function speak(text) {
     if (isMuted || !text.trim()) return;
 
@@ -473,6 +777,104 @@ async function speak(text) {
             return;
         }
 
+        // Split text into chunks if it's too long
+        const chunks = chunkText(text.trim(), 1900); // Use 1900 to be safe (under 2000 limit)
+        
+        console.log(`TTS: Splitting text into ${chunks.length} chunk(s)`);
+
+        // Process chunks sequentially
+        for (let i = 0; i < chunks.length; i++) {
+            const chunk = chunks[i];
+            
+            const response = await fetch('https://api.deepgram.com/v1/speak?model=' + selectedVoice, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Token ${deepgramApiKey}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    text: chunk
+                })
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('TTS API error:', response.status, errorText);
+                
+                // For 400 errors (bad model name), fail silently and don't throw
+                if (response.status === 400) {
+                    console.warn('TTS model not available, skipping speech output');
+                    return;
+                }
+                
+                // For 413 errors (payload too large), try to chunk even smaller
+                if (response.status === 413) {
+                    console.warn('TTS chunk still too large, splitting further...');
+                    // Recursively split this chunk into smaller pieces
+                    const smallerChunks = chunkText(chunk, 1000);
+                    for (const smallerChunk of smallerChunks) {
+                        await speakChunk(smallerChunk);
+                    }
+                    continue;
+                }
+                
+                let errorMessage = 'TTS request failed';
+                if (response.status === 401) {
+                    errorMessage = 'Deepgram API key is invalid. Please check your settings.';
+                } else if (response.status === 403) {
+                    errorMessage = 'Deepgram API key does not have TTS permissions.';
+                } else if (response.status >= 500) {
+                    errorMessage = 'Deepgram service is temporarily unavailable. Please try again later.';
+                }
+                
+                // Don't throw for TTS errors - just log and continue
+                console.warn('TTS error (non-critical):', errorMessage);
+                return;
+            }
+
+            const audioBlob = await response.blob();
+            const audioUrl = URL.createObjectURL(audioBlob);
+
+            // Create and play audio
+            const audio = new Audio(audioUrl);
+            currentAudioQueue.push(audio);
+
+            // Wait for this chunk to finish before playing the next one
+            await new Promise((resolve, reject) => {
+                audio.onended = () => {
+                    URL.revokeObjectURL(audioUrl);
+                    currentAudioQueue = currentAudioQueue.filter(a => a !== audio);
+                    isPlayingAudio = currentAudioQueue.length > 0;
+                    resolve();
+                };
+
+                audio.onerror = (error) => {
+                    console.error('Audio playback error:', error);
+                    URL.revokeObjectURL(audioUrl);
+                    currentAudioQueue = currentAudioQueue.filter(a => a !== audio);
+                    isPlayingAudio = currentAudioQueue.length > 0;
+                    reject(error);
+                };
+
+                isPlayingAudio = true;
+                audio.play().catch(reject);
+            });
+        }
+
+    } catch (error) {
+        console.error('TTS error:', error);
+        // Don't show error to user for TTS failures - just log it
+        // The text message will still be displayed
+    }
+}
+
+/**
+ * Helper function to speak a single chunk (used for recursive splitting)
+ */
+async function speakChunk(chunk) {
+    if (!deepgramApiKey || !chunk.trim()) return;
+
+    try {
         const response = await fetch('https://api.deepgram.com/v1/speak?model=' + selectedVoice, {
             method: 'POST',
             headers: {
@@ -480,53 +882,40 @@ async function speak(text) {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                text: text
+                text: chunk
             })
         });
 
         if (!response.ok) {
-            const errorText = await response.text();
-            console.error('TTS API error:', response.status, errorText);
-            
-            let errorMessage = 'TTS request failed';
-            if (response.status === 401) {
-                errorMessage = 'Deepgram API key is invalid. Please check your settings.';
-            } else if (response.status === 403) {
-                errorMessage = 'Deepgram API key does not have TTS permissions.';
-            } else if (response.status >= 500) {
-                errorMessage = 'Deepgram service is temporarily unavailable. Please try again later.';
-            }
-            
-            throw new Error(errorMessage);
+            console.error('TTS API error for chunk:', response.status);
+            return;
         }
 
         const audioBlob = await response.blob();
         const audioUrl = URL.createObjectURL(audioBlob);
-
-        // Create and play audio
         const audio = new Audio(audioUrl);
         currentAudioQueue.push(audio);
 
-        audio.onended = () => {
-            URL.revokeObjectURL(audioUrl);
-            currentAudioQueue = currentAudioQueue.filter(a => a !== audio);
-            isPlayingAudio = currentAudioQueue.length > 0;
-        };
+        await new Promise((resolve, reject) => {
+            audio.onended = () => {
+                URL.revokeObjectURL(audioUrl);
+                currentAudioQueue = currentAudioQueue.filter(a => a !== audio);
+                isPlayingAudio = currentAudioQueue.length > 0;
+                resolve();
+            };
 
-        audio.onerror = (error) => {
-            console.error('Audio playback error:', error);
-            URL.revokeObjectURL(audioUrl);
-            currentAudioQueue = currentAudioQueue.filter(a => a !== audio);
-            isPlayingAudio = currentAudioQueue.length > 0;
-        };
+            audio.onerror = (error) => {
+                URL.revokeObjectURL(audioUrl);
+                currentAudioQueue = currentAudioQueue.filter(a => a !== audio);
+                isPlayingAudio = currentAudioQueue.length > 0;
+                reject(error);
+            };
 
-        isPlayingAudio = true;
-        await audio.play();
-
+            isPlayingAudio = true;
+            audio.play().catch(reject);
+        });
     } catch (error) {
-        console.error('TTS error:', error);
-        // Don't show error to user for TTS failures - just log it
-        // The text message will still be displayed
+        console.error('TTS chunk error:', error);
     }
 }
 
