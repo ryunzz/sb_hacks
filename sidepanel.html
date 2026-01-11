@@ -21,10 +21,19 @@
             <div class="message assistant">
                 <div class="message-content">
                     Hello! I'm Vision Agent, your AI assistant for navigating the web.
-                    Click the microphone button to start recording, or type your message below.
+                    <strong>Keyboard users:</strong> Hold Space to record, release to send. Press Escape to cancel.
+                    You can also click the microphone button to start recording, or type your message below.
                     Try saying "describe this page" to get started!
                 </div>
             </div>
+        </div>
+
+        <!-- Screen reader live region for recording state -->
+        <div id="recording-status"
+             role="status"
+             aria-live="polite"
+             aria-atomic="true"
+             class="sr-only">
         </div>
 
         <!-- Input Area -->

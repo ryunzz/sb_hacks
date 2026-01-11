@@ -189,6 +189,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return false;
     }
 
+    // Handle cancel-recording with action field
+    if (message.action === 'cancel-recording') {
+        // Send cancel to offscreen document
+        chrome.runtime.sendMessage({
+            type: 'offscreen-cancel-recording'
+        }).catch(err => {
+            console.error('Failed to send cancel-recording to offscreen:', err);
+        });
+        sendResponse({ success: true });
+        return true;
+    }
+
     switch (message.type) {
         case 'message':
             handleUserMessage(message.content)
