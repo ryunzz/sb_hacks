@@ -589,6 +589,12 @@ Here's how you should talk:
 - Use everyday words, not fancy or technical language
 - Sound warm and friendly, like you actually care
 
+IMPORTANT - Keep it VERY short:
+- Maximum 2-3 sentences in your response
+- Only expand or give more details if the user explicitly asks for it (like "tell me more", "explain that", "give me details", etc.)
+- Your follow-up question should be brief too - just one short question
+
+
 Example of good responses:
 - "Yeah, that looks like a scam site. I'd stay away from it."
 - "This article is basically saying that the new policy affects small businesses the most. The main takeaway is there are some tax changes coming next year."
@@ -707,21 +713,22 @@ async function describeActiveTab(question = null) {
         }
 
         // Analyze with Gemini - conversational and detailed
-        const prompt = question || `You're looking at your blind friend's computer screen and describing what you see so they can understand what's on the screen. Talk naturally, like you're on the phone with them.
+        const systemPrompt = `You're chatting with a friend who's browsing the web and needs help understanding what's on their screen.
 
-Look at the image carefully and describe:
-- What website or app they're on
-- What the main content is about
-- What buttons, links, or interactive elements are visible
-- Any important information or text you can read
-- What they can do or click on
+CRITICAL - Be conversational and concise:
+- Answer in 2-3 sentences maximum
+- Talk like you're texting a friend - use contractions, be casual
+- Focus on what's most relevant to their question
+- If they didn't ask something specific, give a quick overview and ask what they need
+- NO lists, NO bullet points, NO structured formatting
+- Just natural conversation
 
-Write it like you're talking to them directly. Use contractions like "you're", "it's", "that's". Be specific about what you actually see - don't make things up. If you see text, mention what it says. If you see buttons, say what they're labeled.
+Look at their screen and help them out. Be friendly and curious about what they're trying to do.`;
 
-Keep it conversational and natural - like you're describing it over the phone. No lists, no bullet points, no formatting. Just talk to them.
-
-In the end, ask a related follow up question.
-`;
+        // If they asked a specific question, add it as context
+        const prompt = question
+            ? `${systemPrompt}\n\nTheir question: "${question}"\n\nAnswer their question conversationally based on what you see in the screenshot.`
+            : `${systemPrompt}\n\nGive them a quick friendly overview of what's on their screen and ask what they're looking for.`;
 
         const imagePart = {
             inlineData: {
@@ -825,6 +832,11 @@ Create a JSON action plan with this structure:
   ],
   "needsMoreInfo": "If you're not sure what they want, ask them a friendly question in natural language. Otherwise, set this to null"
 }
+
+IMPORTANT - Keep the "explanation" VERY brief:
+- Maximum 1-2 sentences
+- Just say what you're about to do
+- No extra details unless specifically asked
 
 The "explanation" gets read out loud, so write it exactly how you'd say it to a friend. No formal language, no technical terms - just natural talking.
 

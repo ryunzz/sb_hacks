@@ -855,9 +855,9 @@ async function handleUserInput(input, existingUserMessageId = null) {
  */
 async function handleQuickAction(action) {
     const prompts = {
-        describe: 'Describe what\'s on my screen right now. What website is this and what are the main elements I can interact with?',
-        summary: 'Give me a brief summary of the main content on this page. What are the key takeaways?',
-        scam: 'Analyze this website for trustworthiness. Are there any red flags that suggest this might be a scam or untrustworthy site? Look for suspicious elements, hidden fees, or misleading information.'
+        describe: "Hey, what's on this page?",
+        summary: 'What are the key points from this page?',
+        scam: 'Does this site look trustworthy or are there any red flags?'
     };
 
     const prompt = prompts[action];
