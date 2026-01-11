@@ -440,7 +440,7 @@ async function handleUserInput(input, existingUserMessageId = null) {
     // Show loading state with animated dots
     currentLoadingMessageId = addMessage('assistant', '...', true);
 
-    // Play conversational filler after 0.4 seconds for immediate responsiveness
+    // Play conversational filler IMMEDIATELY for responsive feel
     const fillerPhrases = [
         "Let me think about that for a moment...",
         "Hmm, interesting question. Give me a second...",
@@ -449,10 +449,12 @@ async function handleUserInput(input, existingUserMessageId = null) {
         "One moment while I look into this..."
     ];
 
-    fillerTimeout = setTimeout(() => {
-        const randomFiller = fillerPhrases[Math.floor(Math.random() * fillerPhrases.length)];
-        speak(randomFiller);
-    }, 400);
+    // Start speaking immediately
+    const randomFiller = fillerPhrases[Math.floor(Math.random() * fillerPhrases.length)];
+    speak(randomFiller);
+    
+    // Set a timeout reference for cleanup (even though we're not delaying)
+    fillerTimeout = setTimeout(() => {}, 0);
 
     try {
         console.log('Sending message to background:', input);

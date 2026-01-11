@@ -9,9 +9,12 @@ let isReady = false;
 let isRecording = false; // Track if recording is in progress
 let currentDeepgramSocket = null; // Track current Deepgram socket
 
-// Transcript state - must be module-level for proper persistence between recordings
+// Transcript state - reset on every new recording session
 let transcript = '';
 let lastInterimTranscript = '';
+
+// Session tracking - used to ignore transcripts from old sessions
+let currentSessionId = 0;
 
 // Signal that offscreen document is ready
 console.log('Offscreen document loaded');
@@ -102,22 +105,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
  * Start recording audio and stream to Deepgram
  */
 async function startRecording(deepgramApiKey, language = 'en') {
-    // FIRST: Reset all transcript state for a completely fresh recording
-    // This MUST happen before any other operations to prevent carryover
-    console.log('Offscreen: Resetting transcript state for new recording');
+    // Generate a new session ID FIRST - this invalidates any old sessions
+    currentSessionId = Date.now();
+    console.log('Offscreen: Starting new recording session:', currentSessionId);
+    
+    // Reset all transcript state for a completely fresh recording
     transcript = '';
     lastInterimTranscript = '';
     window.transcriptAlreadySent = false;
     
-    // Log to verify reset
-    console.log('Offscreen: Transcript state reset - transcript:', transcript, 'lastInterim:', lastInterimTranscript);
-    
-    // Double-check: Force clear any lingering state
-    if (transcript || lastInterimTranscript) {
-        console.warn('Offscreen: WARNING - Transcript state not properly cleared! Forcing clear...');
-        transcript = '';
-        lastInterimTranscript = '';
-    }
+    console.log('Offscreen: Transcript state cleared for session', currentSessionId);
 
     // Prevent multiple simultaneous recordings
     if (isRecording) {
@@ -130,7 +127,7 @@ async function startRecording(deepgramApiKey, language = 'en') {
         lastInterimTranscript = '';
     }
 
-    // Ensure any leftover socket is cleaned up and transcript is cleared
+    // Ensure any leftover socket is cleaned up
     if (window.deepgramSocket) {
         console.warn('Offscreen: Cleaning up leftover WebSocket from previous session');
         try {
@@ -142,19 +139,9 @@ async function startRecording(deepgramApiKey, language = 'en') {
         }
         window.deepgramSocket = null;
         currentDeepgramSocket = null;
-        // Clear transcript when cleaning up old socket (redundant but safe)
-        transcript = '';
-        lastInterimTranscript = '';
     }
     
-    // Set a flag to track when recording actually starts (after WebSocket opens)
-    // This helps us distinguish between old and new transcripts
-    window.recordingSessionId = Date.now();
-    window.recordingStartTime = Date.now();
-    console.log('Offscreen: New recording session ID:', window.recordingSessionId);
-    
-    // CRITICAL: Set transcript to empty string one more time right before WebSocket opens
-    // This ensures no old data can leak in
+    // Final clear before WebSocket opens
     transcript = '';
     lastInterimTranscript = '';
 
@@ -405,11 +392,20 @@ async function startRecording(deepgramApiKey, language = 'en') {
             }
         };
 
+        // Store the session ID for this socket to check against later
+        const socketSessionId = currentSessionId;
+        
         deepgramSocket.onmessage = (event) => {
             // CRITICAL: Check if this message is from the current recording session
-            // If isRecording is false, we've already stopped, so ignore any late messages
+            // This prevents old messages from previous sessions from contaminating new ones
             if (!isRecording) {
-                console.warn('Deepgram: Ignoring message from closed recording session');
+                console.warn('Deepgram: Ignoring message - not recording');
+                return;
+            }
+            
+            // Check session ID to ensure we're not getting stale data
+            if (socketSessionId !== currentSessionId) {
+                console.warn('Deepgram: Ignoring message from old session', socketSessionId, 'current is', currentSessionId);
                 return;
             }
             
@@ -442,37 +438,17 @@ async function startRecording(deepgramApiKey, language = 'en') {
 
                     if (newTranscript && newTranscript.length > 0) {
                         if (isFinal) {
-                            // Final transcript - Deepgram sends the complete utterance for this phrase/sentence
-                            // CRITICAL: We need to be very careful about accumulation
-                            // Only append if:
-                            // 1. We're still recording
-                            // 2. The transcript is not empty
-                            // 3. The new transcript is NOT already in the existing transcript (prevents duplicates)
-                            // 4. The existing transcript is shorter than 2x the new transcript (sanity check)
-                            // 5. The new transcript doesn't start with the existing transcript (prevents old data)
-                            const existingTranscript = transcript.trim();
+                            // Final transcript - Deepgram sends complete utterances
+                            // CRITICAL FIX: NEVER accumulate transcripts across recording sessions
+                            // Deepgram already handles accumulation within a session via its own context
+                            // We should ALWAYS just use the latest final transcript from Deepgram
+                            // The ONLY exception is if we're in a pause between sentences within the same recording
                             
-                            // SIMPLIFIED LOGIC: Only append if transcript is clearly from the same session
-                            // For safety, we'll be very conservative about appending
-                            // Check if this looks like a continuation within the same session
-                            const looksLikeContinuation = isRecording && 
-                                                         existingTranscript.length > 0 && 
-                                                         !newTranscript.includes(existingTranscript) &&
-                                                         !existingTranscript.includes(newTranscript) &&
-                                                         newTranscript.length <= existingTranscript.length * 1.5;
-                            
-                            if (looksLikeContinuation) {
-                                // This is a continuation within the same recording session
-                                transcript = existingTranscript + ' ' + newTranscript;
-                                console.log('Deepgram: Appending final transcript (continuation)');
-                            } else {
-                                // Either fresh transcript or suspicious data - replace completely
-                                // This prevents any carryover from previous sessions
-                                transcript = newTranscript;
-                                console.log('Deepgram: Setting fresh final transcript (replacing old) - existing was:', existingTranscript.substring(0, 50));
-                            }
+                            // Simple approach: Just use the new transcript as-is
+                            // Deepgram's nova-2 model with smart_format handles sentence boundaries
+                            transcript = newTranscript;
                             lastInterimTranscript = ''; // Clear interim since we got final
-                            console.log('Deepgram: Final transcript (isRecording:', isRecording, 'transcript length:', transcript.length, '):', transcript);
+                            console.log('Deepgram: Final transcript set:', transcript);
 
                             // Send accumulated transcript update
                             chrome.runtime.sendMessage({
@@ -481,19 +457,15 @@ async function startRecording(deepgramApiKey, language = 'en') {
                                 isFinal: true
                             });
                         } else {
-                            // Interim result - show accumulated + current interim
+                            // Interim result - just show the current interim
+                            // DON'T accumulate with old transcript - prevents carryover bug
                             lastInterimTranscript = newTranscript;
-                            // Safety check: only use transcript if recording is still active
-                            // This prevents old transcript from previous session being included
-                            const displayTranscript = (isRecording && transcript.trim())
-                                ? transcript + ' ' + newTranscript
-                                : newTranscript;
-                            console.log('Deepgram: Interim transcript (isRecording:', isRecording, 'transcript length:', transcript.length, '):', displayTranscript);
+                            console.log('Deepgram: Interim transcript:', newTranscript);
 
                             // Send interim transcript for real-time display
                             chrome.runtime.sendMessage({
                                 type: 'transcript-update',
-                                transcript: displayTranscript,
+                                transcript: newTranscript,
                                 isFinal: false
                             });
                         }
@@ -502,17 +474,14 @@ async function startRecording(deepgramApiKey, language = 'en') {
                 // Handle UtteranceEnd - speech has ended (pause detected)
                 else if (data.type === 'UtteranceEnd') {
                     console.log('Deepgram: Utterance ended (pause detected)');
-                    // If we have an interim that wasn't finalized, add it to accumulated
+                    // If we have an interim that wasn't finalized, use it as the final
                     if (lastInterimTranscript && lastInterimTranscript.trim()) {
-                        if (transcript.trim()) {
-                            transcript += ' ' + lastInterimTranscript;
-                        } else {
-                            transcript = lastInterimTranscript;
-                        }
+                        // Just use the interim as-is, don't accumulate
+                        transcript = lastInterimTranscript;
                         lastInterimTranscript = '';
-                        console.log('Deepgram: Added interim to accumulated on utterance end:', transcript);
+                        console.log('Deepgram: Using interim as final on utterance end:', transcript);
 
-                        // Send update with accumulated transcript
+                        // Send update with transcript
                         chrome.runtime.sendMessage({
                             type: 'transcript-update',
                             transcript: transcript,
@@ -542,6 +511,12 @@ async function startRecording(deepgramApiKey, language = 'en') {
             if (window.deepgramConnectionTimeout) {
                 clearTimeout(window.deepgramConnectionTimeout);
                 window.deepgramConnectionTimeout = null;
+            }
+            
+            // Check if this is from an old session - if so, ignore it completely
+            if (socketSessionId !== currentSessionId) {
+                console.warn('Deepgram: onclose from old session', socketSessionId, 'current is', currentSessionId, '- ignoring');
+                return;
             }
 
             // Prevent duplicate sends - check if we already sent the result
