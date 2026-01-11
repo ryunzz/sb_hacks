@@ -67,8 +67,8 @@ function initGemini() {
     try {
         const genAI = new GoogleGenerativeAI(config.geminiApiKey);
         geminiClient = {
-            model: genAI.getGenerativeModel({ model: 'gemini-2.0-flash-exp' }),
-            visionModel: genAI.getGenerativeModel({ model: 'gemini-2.0-flash-exp' })
+            model: genAI.getGenerativeModel({ model: 'gemini-2.5-flash' }),
+            visionModel: genAI.getGenerativeModel({ model: 'gemini-2.5-flash' })
         };
         console.log('Gemini initialized');
     } catch (error) {
@@ -223,6 +223,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sendResponse({ success: true });
             return true;
 
+        case 'clear-history':
+            // Clear conversation history
+            conversationHistory = [];
+            console.log('Conversation history cleared');
+            sendResponse({ success: true });
+            return true;
+
 
         default:
             sendResponse({
@@ -332,24 +339,89 @@ async function handleUserMessage(userInput) {
             lowerInput.includes('navigate') ||
             lowerInput.includes('open');
 
-        // Check if this is a request to describe the page/screen
+        // Check if this is a request to describe the page/screen or answer questions about what's visible
+        // This should be VERY broad - when in doubt, use vision!
         const isDescribeRequest =
+            // Direct screen/page references
             lowerInput.includes('screen') ||
             lowerInput.includes('see') ||
             lowerInput.includes('page') ||
             lowerInput.includes('describe') ||
-            lowerInput.includes('what') && (lowerInput.includes('on') || lowerInput.includes('show'));
 
-        console.log('Message routing:', { isAction, isDescribeRequest, input: userInput.substring(0, 50) });
+            // Specific content references
+            lowerInput.includes('this repository') ||
+            lowerInput.includes('this site') ||
+            lowerInput.includes('this website') ||
+            lowerInput.includes('this doc') ||
+            lowerInput.includes('this document') ||
+            lowerInput.includes('this tab') ||
+            lowerInput.includes('this article') ||
+            lowerInput.includes('this video') ||
+            lowerInput.includes('this image') ||
+            lowerInput.includes('this thread') ||
+            lowerInput.includes('comment thread') ||
+            lowerInput.includes('comments') ||
+
+            // Question patterns
+            lowerInput.includes('how many') ||
+            lowerInput.includes('where is') ||
+            lowerInput.includes('where can i') ||
+            lowerInput.includes('can you see') ||
+            lowerInput.includes('what does') ||
+            lowerInput.includes('what is on') ||
+            lowerInput.includes('what\'s on') ||
+            lowerInput.includes('what is the title') ||
+            lowerInput.includes('what\'s the title') ||
+
+            // Analysis/insight requests
+            lowerInput.includes('insights') ||
+            lowerInput.includes('summarize') ||
+            lowerInput.includes('summary') ||
+            lowerInput.includes('analyze') ||
+            lowerInput.includes('analysis') ||
+            lowerInput.includes('explain') ||
+            lowerInput.includes('tell me about') ||
+            lowerInput.includes('what are') ||
+            lowerInput.includes('give me') ||
+
+            // Reading/viewing context
+            lowerInput.includes('reading') ||
+            lowerInput.includes('looking at') ||
+            lowerInput.includes('watching') ||
+            lowerInput.includes('viewing') ||
+
+            // Broad "what" questions that likely need vision
+            (lowerInput.includes('what') && (
+                lowerInput.includes('on') ||
+                lowerInput.includes('show') ||
+                lowerInput.includes('here') ||
+                lowerInput.includes('this') ||
+                lowerInput.includes('from') ||
+                lowerInput.includes('about')
+            ));
+
+        console.log('Message routing:', {
+            isAction,
+            isDescribeRequest,
+            input: userInput.substring(0, 50),
+            lowerInput: lowerInput.substring(0, 50),
+            checks: {
+                hasInsights: lowerInput.includes('insights'),
+                hasComments: lowerInput.includes('comments'),
+                hasThread: lowerInput.includes('thread'),
+                hasSummarize: lowerInput.includes('summarize'),
+                hasWhatFrom: lowerInput.includes('what') && lowerInput.includes('from')
+            }
+        });
 
         if (isAction) {
             console.log('Routing to action handler');
             return await handleActionRequest(userInput);
         } else if (isDescribeRequest) {
-            console.log('Routing to describe handler');
+            console.log('Routing to describe handler (VISION MODEL)');
             return await describeActiveTab(userInput);
         } else {
-            console.log('Routing to chat handler');
+            console.log('Routing to chat handler (NO VISION)');
             return await chat(userInput);
         }
     } catch (error) {
@@ -372,7 +444,7 @@ async function chat(message) {
         };
     }
 
-    const systemPrompt = `You're a helpful friend helping someone navigate the web. Talk to them like you're texting or chatting - natural, casual, and friendly.
+    const systemPrompt = `You're a helpful friend helping someone who is blind navigate the web. Talk to them like you're texting or chatting - natural, casual, and friendly. Make sure what you are saying is clear to someone who is blind
 
 Here's how you should talk:
 - Use contractions: "I'm", "you're", "that's", "it's", "don't", "can't"
@@ -386,13 +458,16 @@ Example of good responses:
 - "This article is basically saying that the new policy affects small businesses the most. The main takeaway is there are some tax changes coming next year."
 - "I don't see any hidden fees here, but let me check the fine print... nope, looks clean to me."
 
-Everything you say gets read out loud, so write exactly how you'd say it in a normal conversation. No lists, no bullet points, no formatting - just natural talking.`;
+Everything you say gets read out loud, so write exactly how you'd say it in a normal conversation. No lists, no bullet points, no formatting - just natural talking.
+
+In the end, send a friendly related follow up question or related statement (show personality).
+`;
 
     try {
         console.log('Starting chat with Gemini, message:', message.substring(0, 50) + '...');
         const chat = geminiClient.model.startChat({
             history: conversationHistory.slice(0, -1).map(h => ({
-                role: h.role,
+                role: h.role === 'assistant' ? 'model' : h.role, // Gemini uses 'model' not 'assistant'
                 parts: [{ text: h.content }]
             })),
             systemInstruction: systemPrompt
@@ -477,7 +552,7 @@ async function describeActiveTab(question = null) {
         }
 
         // Analyze with Gemini - conversational and detailed
-        const prompt = question || `You're looking at a friend's computer screen and describing what you see. Talk naturally, like you're on the phone with them.
+        const prompt = question || `You're looking at your blind friend's computer screen and describing what you see so they can understand what's on the screen. Talk naturally, like you're on the phone with them.
 
 Look at the image carefully and describe:
 - What website or app they're on
@@ -488,7 +563,10 @@ Look at the image carefully and describe:
 
 Write it like you're talking to them directly. Use contractions like "you're", "it's", "that's". Be specific about what you actually see - don't make things up. If you see text, mention what it says. If you see buttons, say what they're labeled.
 
-Keep it conversational and natural - like you're describing it over the phone. No lists, no bullet points, no formatting. Just talk to them.`;
+Keep it conversational and natural - like you're describing it over the phone. No lists, no bullet points, no formatting. Just talk to them.
+
+In the end, ask a related follow up question.
+`;
 
         const imagePart = {
             inlineData: {

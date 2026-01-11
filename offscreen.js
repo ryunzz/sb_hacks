@@ -9,6 +9,10 @@ let isReady = false;
 let isRecording = false; // Track if recording is in progress
 let currentDeepgramSocket = null; // Track current Deepgram socket
 
+// Transcript state - must be module-level for proper persistence between recordings
+let transcript = '';
+let lastInterimTranscript = '';
+
 // Signal that offscreen document is ready
 console.log('Offscreen document loaded');
 isReady = true;
@@ -28,7 +32,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     // Handle async operations
     (async () => {
-        switch (message.type) {
+    switch (message.type) {
             case 'offscreen-start-recording':
                 // Ensure we're ready before starting
                 if (!isReady) {
@@ -85,10 +89,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 break;
 
             case 'offscreen-stop-recording':
-                stopRecording();
-                sendResponse({ success: true });
-                break;
-        }
+            stopRecording();
+            sendResponse({ success: true });
+            break;
+    }
     })();
 
     return true; // Indicates we will send a response asynchronously
@@ -98,15 +102,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
  * Start recording audio and stream to Deepgram
  */
 async function startRecording(deepgramApiKey, language = 'en') {
+    // FIRST: Reset all transcript state for a completely fresh recording
+    // This MUST happen before any other operations to prevent carryover
+    console.log('Offscreen: Resetting transcript state for new recording');
+    transcript = '';
+    lastInterimTranscript = '';
+    window.transcriptAlreadySent = false;
+    
+    // Log to verify reset
+    console.log('Offscreen: Transcript state reset - transcript:', transcript, 'lastInterim:', lastInterimTranscript);
+    
+    // Double-check: Force clear any lingering state
+    if (transcript || lastInterimTranscript) {
+        console.warn('Offscreen: WARNING - Transcript state not properly cleared! Forcing clear...');
+        transcript = '';
+        lastInterimTranscript = '';
+    }
+
     // Prevent multiple simultaneous recordings
     if (isRecording) {
         console.warn('Offscreen: Recording already in progress, stopping previous session first');
         stopRecording();
         // Wait for cleanup to complete
         await new Promise(resolve => setTimeout(resolve, 600));
+        // After stopping, ensure transcript is still clear
+        transcript = '';
+        lastInterimTranscript = '';
     }
 
-    // Ensure any leftover socket is cleaned up
+    // Ensure any leftover socket is cleaned up and transcript is cleared
     if (window.deepgramSocket) {
         console.warn('Offscreen: Cleaning up leftover WebSocket from previous session');
         try {
@@ -118,7 +142,21 @@ async function startRecording(deepgramApiKey, language = 'en') {
         }
         window.deepgramSocket = null;
         currentDeepgramSocket = null;
+        // Clear transcript when cleaning up old socket (redundant but safe)
+        transcript = '';
+        lastInterimTranscript = '';
     }
+    
+    // Set a flag to track when recording actually starts (after WebSocket opens)
+    // This helps us distinguish between old and new transcripts
+    window.recordingSessionId = Date.now();
+    window.recordingStartTime = Date.now();
+    console.log('Offscreen: New recording session ID:', window.recordingSessionId);
+    
+    // CRITICAL: Set transcript to empty string one more time right before WebSocket opens
+    // This ensures no old data can leak in
+    transcript = '';
+    lastInterimTranscript = '';
 
     // Ensure all state is reset
     if (mediaRecorder) {
@@ -170,13 +208,13 @@ async function startRecording(deepgramApiKey, language = 'en') {
         // but accept what we get
         const audioConstraints = {
             audio: {
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true,
-                // Try to get mono audio if possible
-                channelCount: { ideal: 1 },
-                // Try to get 16kHz sample rate if possible (Deepgram works with various rates)
-                sampleRate: { ideal: 16000 }
+                echoCancellation: true,  // Remove echo
+                noiseSuppression: true,  // Remove background noise
+                autoGainControl: true,   // Normalize volume
+                channelCount: { ideal: 1 },  // Mono audio (sufficient for speech)
+                sampleRate: { ideal: 48000 },  // Higher quality (Deepgram handles downsampling)
+                // Request higher quality audio for better transcription
+                sampleSize: { ideal: 16 }
             }
         };
 
@@ -206,9 +244,16 @@ async function startRecording(deepgramApiKey, language = 'en') {
         // Format: ['token', 'YOUR_API_KEY']
         // Reference: https://developers.deepgram.com/docs/using-the-sec-websocket-protocol
         const languageParam = language !== 'en' ? `&language=${language}` : '';
-        // Deepgram WebSocket API - let it auto-detect encoding
-        // WebM/Opus is automatically detected, no need to specify encoding
-        const deepgramUrl = `wss://api.deepgram.com/v1/listen?model=nova-2&punctuate=true&smart_format=true&interim_results=true${languageParam}`;
+        // Enhanced Deepgram WebSocket API configuration for better accuracy
+        // - model=nova-2: Latest and most accurate model
+        // - punctuate=true: Add punctuation
+        // - smart_format=true: Format numbers, dates, etc.
+        // - interim_results=true: Real-time transcription
+        // - diarize=false: Single speaker (faster, more accurate for single user)
+        // - filler_words=false: Remove um, uh, etc. for cleaner output
+        // - utterance_end_ms=1500: Wait 1.5s of silence before finalizing (better for natural pauses)
+        // - endpointing=300: Detect end of speech after 300ms of silence
+        const deepgramUrl = `wss://api.deepgram.com/v1/listen?model=nova-2&punctuate=true&smart_format=true&interim_results=true&diarize=false&filler_words=false&utterance_end_ms=1500&endpointing=300${languageParam}`;
 
         console.log('Connecting to Deepgram WebSocket...');
         console.log('Deepgram URL:', deepgramUrl);
@@ -233,9 +278,7 @@ async function startRecording(deepgramApiKey, language = 'en') {
         // Store timeout for cleanup
         window.deepgramConnectionTimeout = connectionTimeout;
 
-        // Reset transcript for new recording session
-        let transcript = '';
-        let lastInterimTranscript = ''; // Track last interim transcript in case no final comes
+        // Note: transcript state is reset at the start of startRecording()
 
         deepgramSocket.onopen = () => {
             console.log('Offscreen: Deepgram connected successfully');
@@ -291,7 +334,7 @@ async function startRecording(deepgramApiKey, language = 'en') {
                     settings: t.getSettings()
                 })));
 
-                mediaRecorder = new MediaRecorder(audioStream, {
+            mediaRecorder = new MediaRecorder(audioStream, {
                     mimeType: selectedMimeType
                 });
 
@@ -316,7 +359,7 @@ async function startRecording(deepgramApiKey, language = 'en') {
                                 console.error('MediaRecorder: Failed to send chunk:', sendError);
                                 // Fallback: try sending as Blob directly
                                 try {
-                                    deepgramSocket.send(event.data);
+                    deepgramSocket.send(event.data);
                                     console.log(`MediaRecorder: Sent chunk ${chunkCount} as Blob fallback`);
                                 } catch (fallbackError) {
                                     console.error('MediaRecorder: Both ArrayBuffer and Blob send failed:', fallbackError);
@@ -350,8 +393,8 @@ async function startRecording(deepgramApiKey, language = 'en') {
                 mediaRecorder.start(250);
                 console.log('MediaRecorder started with 250ms chunks');
 
-                // Notify sidepanel that recording started
-                chrome.runtime.sendMessage({ type: 'recording-started' });
+            // Notify sidepanel that recording started
+            chrome.runtime.sendMessage({ type: 'recording-started' });
             } catch (error) {
                 console.error('Failed to start MediaRecorder:', error);
                 chrome.runtime.sendMessage({
@@ -363,6 +406,13 @@ async function startRecording(deepgramApiKey, language = 'en') {
         };
 
         deepgramSocket.onmessage = (event) => {
+            // CRITICAL: Check if this message is from the current recording session
+            // If isRecording is false, we've already stopped, so ignore any late messages
+            if (!isRecording) {
+                console.warn('Deepgram: Ignoring message from closed recording session');
+                return;
+            }
+            
             try {
                 // Deepgram sends JSON text messages (not binary)
                 const text = typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data);
@@ -375,7 +425,7 @@ async function startRecording(deepgramApiKey, language = 'en') {
                     let isFinal = false;
 
                     // Format 1: data.channel.alternatives[0].transcript
-                    if (data.channel?.alternatives?.[0]?.transcript) {
+            if (data.channel?.alternatives?.[0]?.transcript) {
                         newTranscript = data.channel.alternatives[0].transcript.trim();
                         isFinal = data.is_final === true;
                     }
@@ -392,15 +442,37 @@ async function startRecording(deepgramApiKey, language = 'en') {
 
                     if (newTranscript && newTranscript.length > 0) {
                         if (isFinal) {
-                            // Final transcript - append to accumulated transcript
-                            // Add space before if we already have content
-                            if (transcript.trim()) {
-                                transcript += ' ' + newTranscript;
+                            // Final transcript - Deepgram sends the complete utterance for this phrase/sentence
+                            // CRITICAL: We need to be very careful about accumulation
+                            // Only append if:
+                            // 1. We're still recording
+                            // 2. The transcript is not empty
+                            // 3. The new transcript is NOT already in the existing transcript (prevents duplicates)
+                            // 4. The existing transcript is shorter than 2x the new transcript (sanity check)
+                            // 5. The new transcript doesn't start with the existing transcript (prevents old data)
+                            const existingTranscript = transcript.trim();
+                            
+                            // SIMPLIFIED LOGIC: Only append if transcript is clearly from the same session
+                            // For safety, we'll be very conservative about appending
+                            // Check if this looks like a continuation within the same session
+                            const looksLikeContinuation = isRecording && 
+                                                         existingTranscript.length > 0 && 
+                                                         !newTranscript.includes(existingTranscript) &&
+                                                         !existingTranscript.includes(newTranscript) &&
+                                                         newTranscript.length <= existingTranscript.length * 1.5;
+                            
+                            if (looksLikeContinuation) {
+                                // This is a continuation within the same recording session
+                                transcript = existingTranscript + ' ' + newTranscript;
+                                console.log('Deepgram: Appending final transcript (continuation)');
                             } else {
+                                // Either fresh transcript or suspicious data - replace completely
+                                // This prevents any carryover from previous sessions
                                 transcript = newTranscript;
+                                console.log('Deepgram: Setting fresh final transcript (replacing old) - existing was:', existingTranscript.substring(0, 50));
                             }
                             lastInterimTranscript = ''; // Clear interim since we got final
-                            console.log('Deepgram: Final transcript (accumulated):', transcript);
+                            console.log('Deepgram: Final transcript (isRecording:', isRecording, 'transcript length:', transcript.length, '):', transcript);
 
                             // Send accumulated transcript update
                             chrome.runtime.sendMessage({
@@ -411,10 +483,12 @@ async function startRecording(deepgramApiKey, language = 'en') {
                         } else {
                             // Interim result - show accumulated + current interim
                             lastInterimTranscript = newTranscript;
-                            const displayTranscript = transcript.trim()
+                            // Safety check: only use transcript if recording is still active
+                            // This prevents old transcript from previous session being included
+                            const displayTranscript = (isRecording && transcript.trim())
                                 ? transcript + ' ' + newTranscript
                                 : newTranscript;
-                            console.log('Deepgram: Interim transcript:', displayTranscript);
+                            console.log('Deepgram: Interim transcript (isRecording:', isRecording, 'transcript length:', transcript.length, '):', displayTranscript);
 
                             // Send interim transcript for real-time display
                             chrome.runtime.sendMessage({
@@ -470,6 +544,16 @@ async function startRecording(deepgramApiKey, language = 'en') {
                 window.deepgramConnectionTimeout = null;
             }
 
+            // Prevent duplicate sends - check if we already sent the result
+            if (window.transcriptAlreadySent) {
+                console.log('Deepgram: Transcript already sent, skipping duplicate');
+                isRecording = false;
+                // Clear transcript state to prevent carryover
+                transcript = '';
+                lastInterimTranscript = '';
+                return;
+            }
+
             // Always check if we have a transcript first, regardless of close code
             // Code 1011 can happen even when we have a valid transcript
             let finalTranscript = transcript.trim();
@@ -486,9 +570,20 @@ async function startRecording(deepgramApiKey, language = 'en') {
             if (finalTranscript) {
                 // We have a transcript - send it regardless of close code
                 console.log('Deepgram: Sending transcript on close:', finalTranscript);
+                window.transcriptAlreadySent = true; // Mark as sent
+                
+                // Store transcript before clearing
+                const transcriptToSend = finalTranscript;
+                
+                // CRITICAL: Clear transcript state IMMEDIATELY before sending to prevent any race conditions
+                transcript = '';
+                lastInterimTranscript = '';
+                console.log('Deepgram: Transcript state cleared before sending result');
+                
+                // Now send the stored transcript
                 chrome.runtime.sendMessage({
                     type: 'transcript-result',
-                    transcript: finalTranscript
+                    transcript: transcriptToSend
                 });
             } else {
                 // No transcript - check if it's an error or just no speech detected
@@ -500,6 +595,9 @@ async function startRecording(deepgramApiKey, language = 'en') {
                         type: 'transcript-result',
                         transcript: ''
                     });
+                    // Clear transcript state
+                    transcript = '';
+                    lastInterimTranscript = '';
                 } else {
                     // Unexpected closure without transcript
                     let errorMsg = 'Deepgram connection closed unexpectedly';
@@ -536,6 +634,10 @@ async function startRecording(deepgramApiKey, language = 'en') {
                         error: errorMsg
                     });
                 }
+                
+                // Clear transcript state on error to prevent carryover
+                transcript = '';
+                lastInterimTranscript = '';
             }
         };
 
@@ -574,11 +676,11 @@ async function startRecording(deepgramApiKey, language = 'en') {
             // Only send error if socket is already closed (onclose might not fire in some cases)
             // Otherwise, let onclose handle it with more details
             if (readyState === WebSocket.CLOSED) {
-                chrome.runtime.sendMessage({
-                    type: 'recording-error',
+            chrome.runtime.sendMessage({
+                type: 'recording-error',
                     error: errorMessage
-                });
-                stopRecording();
+            });
+            stopRecording();
             }
             // If not closed yet, wait for onclose to provide more specific error
         };
@@ -633,13 +735,13 @@ function stopRecording() {
         console.log('MediaRecorder state before stop:', mediaRecorder.state);
         if (mediaRecorder.state !== 'inactive' && mediaRecorder.state !== 'stopped') {
             try {
-                mediaRecorder.stop();
+        mediaRecorder.stop();
                 console.log('MediaRecorder stopped');
             } catch (error) {
                 console.error('Error stopping MediaRecorder:', error);
             }
-        }
-        mediaRecorder = null;
+    }
+    mediaRecorder = null;
     }
 
     // Stop audio stream tracks
@@ -703,6 +805,13 @@ function stopRecording() {
     }
 
     currentDeepgramSocket = null;
+    
+    // ALWAYS clear transcript state when stopping to prevent any carryover
+    // The onclose handler will have already sent the transcript if it exists
+    transcript = '';
+    lastInterimTranscript = '';
+    window.transcriptAlreadySent = false; // Reset flag for next recording
+    console.log('Offscreen: Transcript state cleared in stopRecording');
 
     console.log('Recording cleanup complete');
 }

@@ -11,6 +11,7 @@ const sendBtn = document.getElementById('sendBtn');
 const statusEl = document.getElementById('status');
 const settingsBtn = document.getElementById('settingsBtn');
 const muteBtn = document.getElementById('muteBtn');
+const clearChatBtn = document.getElementById('clearChatBtn');
 const micPermissionModal = document.getElementById('micPermissionModal');
 const openMicSettingsBtn = document.getElementById('openMicSettings');
 const closeModalBtn = document.getElementById('closeModal');
@@ -23,7 +24,7 @@ let mediaRecorder = null;
 let audioStream = null;
 let deepgramApiKey = '';
 let selectedLanguage = 'en';
-let selectedVoice = 'aura-asteria-en';
+let selectedVoice = 'aura-2-thalia-en';
 let currentAudioQueue = [];
 let isPlayingAudio = false;
 let fillerTimeout = null;
@@ -51,12 +52,15 @@ function setupOffscreenListeners() {
                 break;
 
             case 'transcript-update':
-                // Real-time transcript updates (interim and final)
+                // Real-time transcript updates - only update text input, not message area
+                // User will review in text input and manually send
                 console.log('Transcript update received:', message.transcript, 'isFinal:', message.isFinal);
-                if (message.transcript) {
-                    // Update text input in real-time as user speaks
+                if (message.transcript && isListening) {
+                    // Only update text input if we're currently recording
+                    // CRITICAL: Always use the transcript from the message directly
+                    // Don't append to existing value to prevent carryover
                     textInput.value = message.transcript;
-                    
+
                     // Show visual feedback that we're receiving audio
                     if (!message.isFinal) {
                         textInput.style.borderColor = '#4f9eff';
@@ -65,84 +69,38 @@ function setupOffscreenListeners() {
                         textInput.style.borderColor = '#10b981';
                         textInput.style.borderWidth = '2px';
                     }
-                    
-                    // Show transcript in messages area in real-time
-                    if (!currentUserMessageId) {
-                        // Create new user message for the transcript
-                        currentUserMessageId = addMessage('user', message.transcript, false);
-                    } else {
-                        // Update existing user message with latest transcript
-                        const messageEl = document.getElementById(currentUserMessageId);
-                        if (messageEl) {
-                            const contentEl = messageEl.querySelector('.message-content');
-                            if (contentEl) {
-                                contentEl.textContent = message.transcript;
-                                // Add visual indicator for interim results
-                                if (!message.isFinal) {
-                                    messageEl.classList.add('interim');
-                                } else {
-                                    messageEl.classList.remove('interim');
-                                }
-                                // Scroll to bottom
-                                messagesContainer.scrollTop = messagesContainer.scrollHeight;
-                            }
-                        }
-                    }
                 }
                 break;
 
             case 'transcript-result':
-                // Final transcript when recording stops - auto-send the message
+                // Final transcript when recording stops - put in input for user to review
                 console.log('Final transcript received:', message.transcript);
-                
+
                 // Reset border styling
                 textInput.style.borderColor = '';
                 textInput.style.borderWidth = '';
-                
+
                 // Reset listening state
                 isListening = false;
                 voiceBtn.classList.remove('listening');
                 voiceBtn.querySelector('.voice-text').textContent = 'Start Recording';
                 voiceBtn.setAttribute('aria-label', 'Start recording');
                 voiceBtn.setAttribute('title', 'Click to start recording');
-                
+
                 if (message.transcript && message.transcript.trim()) {
                     const finalText = message.transcript.trim();
-                    
-                    // Update the user message with final transcript (remove interim styling)
-                    if (currentUserMessageId) {
-                        const messageEl = document.getElementById(currentUserMessageId);
-                        if (messageEl) {
-                            const contentEl = messageEl.querySelector('.message-content');
-                            if (contentEl) {
-                                contentEl.textContent = finalText;
-                                messageEl.classList.remove('interim');
-                            }
-                        }
-                    } else {
-                        // No existing message, create one
-                        currentUserMessageId = addMessage('user', finalText, false);
-                    }
-                    
-                    // Clear the input
-                    textInput.value = '';
-                    
-                    // Store the message ID before sending
-                    const messageIdToSend = currentUserMessageId;
-                    
-                    // Reset user message tracking BEFORE sending (to prevent conflicts)
-                    currentUserMessageId = null;
-                    
-                    // Auto-send the message immediately
-                    console.log('Auto-sending transcript:', finalText);
-                    handleUserInput(finalText, messageIdToSend);
-                    setStatus('Message sent');
+
+                    // Put transcript in text input for user to review and send manually
+                    textInput.value = finalText;
+
+                    // Focus the text input so user can edit or send
+                    textInput.focus();
+
+                    setStatus('Review and click Send');
+                    announceToScreenReader('Transcript ready. Review and click send or press enter.');
                 } else {
-                    // No transcript, remove the user message if it exists
-                    if (currentUserMessageId) {
-                        removeMessage(currentUserMessageId);
-                        currentUserMessageId = null;
-                    }
+                    // No transcript, clear input
+                    textInput.value = '';
                     setStatus('Ready to help');
                 }
                 break;
@@ -165,7 +123,7 @@ function setupOffscreenListeners() {
                 voiceBtn.setAttribute('aria-label', 'Start recording');
                 voiceBtn.setAttribute('title', 'Click to start recording');
                 setStatus('Ready to help');
-                
+
                 // If permission was denied, show request permission button
                 if (message.showSettingsLink || (errorMsg && errorMsg.includes('permission'))) {
                     setTimeout(() => {
@@ -177,7 +135,7 @@ function setupOffscreenListeners() {
                             requestBtn.style.marginTop = '12px';
                             requestBtn.style.width = '100%';
                             requestBtn.onclick = () => {
-                                chrome.tabs.create({ 
+                                chrome.tabs.create({
                                     url: chrome.runtime.getURL('requestPermissions.html'),
                                     active: true
                                 });
@@ -186,10 +144,10 @@ function setupOffscreenListeners() {
                         }
                     }, 100);
                 }
-                
+
                 setStatus('Ready to help');
                 break;
-                
+
             case 'microphone-permission-granted':
                 // Permission was granted in the requestPermissions page
                 console.log('Microphone permission granted');
@@ -214,9 +172,7 @@ async function loadConfig() {
         deepgramApiKey = config.deepgramApiKey || '';
         isMuted = config.voiceMuted || false;
         selectedLanguage = config.language || 'en';
-        // Fix invalid voice model - migrate from old config
-        const storedVoice = config.voiceModel || 'aura-asteria-en';
-        selectedVoice = (storedVoice === 'aura-thalia-en') ? 'aura-asteria-en' : storedVoice;
+        selectedVoice = config.voiceModel || 'aura-2-thalia-en';
         updateMuteButton();
     } catch (error) {
         console.error('Failed to load config:', error);
@@ -273,6 +229,9 @@ function setupEventListeners() {
     // Mute toggle
     muteBtn.addEventListener('click', toggleMute);
 
+    // Clear chat button
+    clearChatBtn.addEventListener('click', clearChat);
+
     // Modal buttons
     openMicSettingsBtn.addEventListener('click', () => {
         // Open mic permission page in a new tab where Chrome allows proper permission requests
@@ -295,7 +254,7 @@ function setupEventListeners() {
             selectedLanguage = changes.language.newValue || 'en';
         }
         if (changes.voiceModel) {
-            selectedVoice = changes.voiceModel.newValue || 'aura-asteria-en';
+            selectedVoice = changes.voiceModel.newValue || 'aura-2-thalia-en';
         }
     });
 }
@@ -311,7 +270,7 @@ async function checkMicrophonePermission() {
             const result = await navigator.permissions.query({ name: 'microphone' });
             return result.state === 'granted';
         }
-        
+
         // If Permissions API not available, try a test getUserMedia call
         // This will fail silently if permission is denied
         try {
@@ -337,7 +296,7 @@ async function requestMicrophonePermission() {
         url: chrome.runtime.getURL('requestPermissions.html'),
         active: true
     });
-    
+
     addMessage('assistant', 'Opening microphone permission page. Please allow microphone access when prompted, then try again.');
     speak('Opening microphone permission page. Please allow microphone access when prompted.');
 }
@@ -380,15 +339,15 @@ async function startListening() {
     voiceBtn.querySelector('.voice-text').textContent = 'Stop Recording';
     voiceBtn.setAttribute('aria-label', 'Stop recording');
     voiceBtn.setAttribute('title', 'Click to stop recording');
-    
+
     // Clear text input to prepare for new transcript
     textInput.value = '';
     textInput.style.borderColor = '';
     textInput.style.borderWidth = '';
-    
+
     // Reset user message tracking for new recording session
     currentUserMessageId = null;
-    
+
     setStatus('Listening... Speak now');
 
     try {
@@ -406,7 +365,7 @@ async function startListening() {
         console.error('Start recording error:', error);
         const errorMsg = error.message || 'Could not access microphone. Please check your permissions.';
         addMessage('assistant', errorMsg);
-        
+
         // If permission error, offer to request permission again
         if (error.message && (error.message.includes('permission') || error.message.includes('NotAllowed'))) {
             setTimeout(() => {
@@ -421,7 +380,7 @@ async function startListening() {
                 }
             }, 100);
         }
-        
+
         stopListening();
     }
 }
@@ -450,7 +409,12 @@ function sendTextMessage() {
     const text = textInput.value.trim();
     if (!text) return;
 
+    // Clear the input immediately to prevent it from being used again
     textInput.value = '';
+    
+    // Clear any transcript state to prevent carryover
+    currentUserMessageId = null;
+    
     handleUserInput(text);
 }
 
@@ -458,13 +422,19 @@ function sendTextMessage() {
  * Handle user input (from voice or text)
  */
 async function handleUserInput(input, existingUserMessageId = null) {
-    // Reset any voice-related state when switching to text mode
+    // Clear text input immediately to prevent reuse
+    textInput.value = '';
+    
+    // Only add a new user message if one wasn't already created (e.g., from voice transcript)
     if (!existingUserMessageId) {
-        // This is a text input, not voice - reset voice state
-        currentUserMessageId = null;
+        // This is a text input - add the user message
         addMessage('user', input);
     }
+    // If existingUserMessageId is provided, the message already exists in the UI
     
+    // Clear any transcript state to prevent carryover
+    currentUserMessageId = null;
+
     setStatus('Thinking...');
 
     // Show loading state with animated dots
@@ -508,7 +478,12 @@ async function handleUserInput(input, existingUserMessageId = null) {
         if (currentLoadingMessageId) {
             const loadingEl = document.getElementById(currentLoadingMessageId);
             if (loadingEl) {
+                // Ensure it's an assistant message (not user)
                 loadingEl.classList.remove('loading');
+                if (!loadingEl.classList.contains('assistant')) {
+                    loadingEl.classList.remove('user');
+                    loadingEl.classList.add('assistant');
+                }
                 const contentEl = loadingEl.querySelector('.message-content');
                 if (contentEl) {
                     // We'll update this with the actual response below
@@ -533,6 +508,9 @@ async function handleUserInput(input, existingUserMessageId = null) {
             if (currentLoadingMessageId) {
                 const loadingEl = document.getElementById(currentLoadingMessageId);
                 if (loadingEl) {
+                    // Ensure it's an assistant message (left side, not user)
+                    loadingEl.classList.remove('loading', 'user');
+                    loadingEl.classList.add('assistant');
                     const contentEl = loadingEl.querySelector('.message-content');
                     if (contentEl) {
                         contentEl.textContent = errorText;
@@ -546,12 +524,15 @@ async function handleUserInput(input, existingUserMessageId = null) {
             }
         } else if (response.type === 'response') {
             const messageText = response.message || response.text || '';
-            if (messageText) {
+            if (messageText && messageText.trim()) {
                 console.log('Success response:', messageText.substring(0, 100));
                 // Update loading message with actual response
                 if (currentLoadingMessageId) {
                     const loadingEl = document.getElementById(currentLoadingMessageId);
                     if (loadingEl) {
+                        // Ensure it's an assistant message (left side, not user)
+                        loadingEl.classList.remove('loading', 'user');
+                        loadingEl.classList.add('assistant');
                         const contentEl = loadingEl.querySelector('.message-content');
                         if (contentEl) {
                             contentEl.textContent = messageText;
@@ -579,7 +560,7 @@ async function handleUserInput(input, existingUserMessageId = null) {
         } else {
             // Fallback: try to extract message from any response format
             console.log('Response format check - type:', response.type, 'keys:', Object.keys(response));
-            
+
             // Check if it's an error object without type
             if (response.error) {
                 console.error('Error response without type field:', response);
@@ -606,11 +587,14 @@ async function handleUserInput(input, existingUserMessageId = null) {
                 setStatus('Ready to help');
             } else {
                 const messageText = response.message || response.text || response.content || (typeof response === 'string' ? response : '');
-                if (messageText) {
+                if (messageText && messageText.trim()) {
                     console.log('Response (fallback):', messageText.substring(0, 100));
                     if (currentLoadingMessageId) {
                         const loadingEl = document.getElementById(currentLoadingMessageId);
                         if (loadingEl) {
+                            // Ensure it's an assistant message (left side, not user)
+                            loadingEl.classList.remove('loading', 'user');
+                            loadingEl.classList.add('assistant');
                             const contentEl = loadingEl.querySelector('.message-content');
                             if (contentEl) {
                                 contentEl.textContent = messageText;
@@ -652,7 +636,7 @@ async function handleUserInput(input, existingUserMessageId = null) {
         }
 
         stopAllAudio();
-        
+
         // Update loading message with error
         if (currentLoadingMessageId) {
             const loadingEl = document.getElementById(currentLoadingMessageId);
@@ -756,10 +740,10 @@ function chunkText(text, maxLength = 1900) {
         const lastExclamation = chunk.lastIndexOf('!');
         const lastQuestion = chunk.lastIndexOf('?');
         const lastNewline = chunk.lastIndexOf('\n');
-        
+
         // Find the best break point (prefer sentence endings, then newlines)
         let breakPoint = Math.max(lastPeriod, lastExclamation, lastQuestion, lastNewline);
-        
+
         // If we found a good break point (within last 200 chars), use it
         if (breakPoint > maxLength - 200 && breakPoint > 0) {
             chunk = remaining.substring(0, breakPoint + 1).trim();
@@ -787,13 +771,15 @@ async function speak(text) {
     // Stop any ongoing speech
     stopAllAudio();
 
-    // Try to load API key if not available
-    if (!deepgramApiKey || deepgramApiKey.trim() === '') {
+    // Try to load API key and voice model if not available
+    if (!deepgramApiKey || deepgramApiKey.trim() === '' || !selectedVoice) {
         try {
-            const config = await chrome.storage.local.get(['deepgramApiKey']);
+            const config = await chrome.storage.local.get(['deepgramApiKey', 'voiceModel']);
             deepgramApiKey = config.deepgramApiKey || '';
+            selectedVoice = config.voiceModel || 'aura-2-thalia-en';
+            console.log('TTS: Loaded voice model from config:', selectedVoice);
         } catch (error) {
-            console.warn('Failed to load Deepgram API key for TTS:', error);
+            console.warn('Failed to load Deepgram config for TTS:', error);
         }
     }
 
@@ -801,18 +787,24 @@ async function speak(text) {
         console.warn('No Deepgram API key for TTS - skipping speech output');
         return;
     }
+    
+    // Ensure we have a valid voice model
+    if (!selectedVoice || selectedVoice === 'aura-thalia-en') {
+        selectedVoice = 'aura-2-thalia-en';
+        console.log('TTS: Fixed voice model to:', selectedVoice);
+    }
 
     try {
 
         // Split text into chunks if it's too long
         const chunks = chunkText(text.trim(), 1900); // Use 1900 to be safe (under 2000 limit)
-        
+
         console.log(`TTS: Splitting text into ${chunks.length} chunk(s)`);
 
         // Process chunks sequentially
         for (let i = 0; i < chunks.length; i++) {
             const chunk = chunks[i];
-            
+
             const response = await fetch('https://api.deepgram.com/v1/speak?model=' + selectedVoice, {
                 method: 'POST',
                 headers: {
@@ -827,13 +819,13 @@ async function speak(text) {
             if (!response.ok) {
                 const errorText = await response.text();
                 console.error('TTS API error:', response.status, errorText);
-                
+
                 // For 400 errors (bad model name), fail silently and don't throw
                 if (response.status === 400) {
                     console.warn('TTS model not available, skipping speech output');
                     return;
                 }
-                
+
                 // For 413 errors (payload too large), try to chunk even smaller
                 if (response.status === 413) {
                     console.warn('TTS chunk still too large, splitting further...');
@@ -844,7 +836,7 @@ async function speak(text) {
                     }
                     continue;
                 }
-                
+
                 let errorMessage = 'TTS request failed';
                 if (response.status === 401) {
                     errorMessage = 'Deepgram API key is invalid. Please check your settings.';
@@ -853,7 +845,7 @@ async function speak(text) {
                 } else if (response.status >= 500) {
                     errorMessage = 'Deepgram service is temporarily unavailable. Please try again later.';
                 }
-                
+
                 // Don't throw for TTS errors - just log and continue
                 console.warn('TTS error (non-critical):', errorMessage);
                 return;
@@ -1013,4 +1005,44 @@ function showMicPermissionModal() {
  */
 function hideMicPermissionModal() {
     micPermissionModal.classList.remove('visible');
+}
+
+/**
+ * Clear current input (not the whole chat)
+ */
+function clearChat() {
+    // Stop any ongoing audio
+    stopAllAudio();
+
+    // Stop recording if active
+    if (isListening) {
+        stopListening();
+    }
+
+    // Clear all messages except the welcome message
+    messagesContainer.innerHTML = `
+        <div class="message assistant">
+            <div class="message-content">
+                Hello! I'm Vision Agent, your AI assistant for navigating the web.
+                Click the microphone button to start recording, or type your message below.
+                Try saying "describe this page" to get started!
+            </div>
+        </div>
+    `;
+
+    // Clear text input
+    textInput.value = '';
+
+    // Reset state
+    currentUserMessageId = null;
+    currentLoadingMessageId = null;
+
+    // Clear conversation history in background
+    chrome.runtime.sendMessage({ type: 'clear-history' }).catch(err => {
+        console.error('Failed to clear history in background:', err);
+    });
+
+    // Announce to screen reader
+    announceToScreenReader('Chat history cleared');
+    setStatus('Chat cleared - Ready to help');
 }

@@ -27,7 +27,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         deepgramKeyInput.value = config.deepgramApiKey || '';
         twelveLabsKeyInput.value = config.twelveLabsApiKey || '';
         languageSelect.value = config.language || 'en';
-        voiceModelSelect.value = config.voiceModel || 'aura-asteria-en';
+        voiceModelSelect.value = config.voiceModel || 'aura-2-thalia-en';
     } catch (error) {
         console.error('Failed to load settings:', error);
     }
@@ -59,7 +59,7 @@ form.addEventListener('submit', async (e) => {
 
         // Save to storage
         await chrome.storage.local.set(config);
-        
+
         // Verify it was saved
         const verify = await chrome.storage.local.get(['deepgramApiKey']);
         if (config.deepgramApiKey && !verify.deepgramApiKey) {
@@ -69,7 +69,7 @@ form.addEventListener('submit', async (e) => {
             saveBtn.textContent = '💾 Save Settings';
             return;
         }
-        
+
         console.log('Settings saved. Deepgram API key length:', verify.deepgramApiKey ? verify.deepgramApiKey.length : 0);
 
         // Notify background script

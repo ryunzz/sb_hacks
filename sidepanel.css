@@ -180,9 +180,12 @@ body {
 }
 
 @keyframes pulseInterim {
-    0%, 100% {
+
+    0%,
+    100% {
         opacity: 0.7;
     }
+
     50% {
         opacity: 0.9;
     }
@@ -351,7 +354,8 @@ body {
 }
 
 .settings-link,
-.mute-btn {
+.mute-btn,
+.clear-btn {
     background: none;
     border: none;
     color: var(--text-secondary);
@@ -366,13 +370,15 @@ body {
 }
 
 .settings-link:hover,
-.mute-btn:hover {
+.mute-btn:hover,
+.clear-btn:hover {
     color: var(--text-primary);
     background: var(--bg-tertiary);
 }
 
 .settings-link:focus-visible,
-.mute-btn:focus-visible {
+.mute-btn:focus-visible,
+.clear-btn:focus-visible {
     outline: 3px solid var(--warning);
     outline-offset: 2px;
 }
