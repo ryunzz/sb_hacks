@@ -273,17 +273,18 @@
                 </h2>
 
                 <div class="form-group">
-                    <label for="deepgramKey">
-                        Deepgram API Key
-                        <span class="badge required">Required for Voice</span>
+                    <label for="elevenlabsKey">
+                        ElevenLabs API Key
+                        <span class="badge required">Required for Voice Output</span>
                     </label>
                     <div class="input-wrapper">
-                        <input type="password" id="deepgramKey" placeholder="Enter your Deepgram API key"
+                        <input type="password" id="elevenlabsKey" placeholder="Enter your ElevenLabs API key"
                             autocomplete="off">
                     </div>
                     <p class="help-text">
                         Get your API key from
-                        <a href="https://console.deepgram.com/" target="_blank">Deepgram Console</a>
+                        <a href="https://elevenlabs.io/app/settings/api-keys" target="_blank">ElevenLabs Settings</a>.
+                        Free tier: 10,000 characters/month. Voice input uses browser's built-in Web Speech API (no API key needed).
                     </p>
                 </div>
 
@@ -313,26 +314,20 @@
                 </div>
 
                 <div class="form-group">
-                    <label for="voiceModel">
-                        Voice Model
+                    <label for="voiceId">
+                        Voice Selection
                     </label>
-                    <select id="voiceModel" class="select-input">
-                        <option value="aura-thalia-en">Thalia (English) - Warm, Conversational</option>
-                        <option value="aura-asteria-en">Asteria (English) - Professional, Clear</option>
-                        <option value="aura-luna-en">Luna (English) - Friendly, Upbeat</option>
-                        <option value="aura-stella-en">Stella (English) - Calm, Soothing</option>
-                        <option value="aura-athena-en">Athena (English) - Authoritative, Confident</option>
-                        <option value="aura-hera-en">Hera (English) - Mature, Sophisticated</option>
-                        <option value="aura-orion-en">Orion (English, Male) - Deep, Strong</option>
-                        <option value="aura-arcas-en">Arcas (English, Male) - Natural, Versatile</option>
-                        <option value="aura-perseus-en">Perseus (English, Male) - Professional, Clear</option>
-                        <option value="aura-angus-en">Angus (English, Irish) - Warm, Friendly</option>
-                        <option value="aura-orpheus-en">Orpheus (English, Male) - Smooth, Engaging</option>
-                        <option value="aura-helios-en">Helios (English, Male) - Energetic, Vibrant</option>
-                        <option value="aura-zeus-en">Zeus (English, Male) - Commanding, Powerful</option>
+                    <select id="voiceId" class="select-input">
+                        <option value="21m00Tcm4TlvDq8ikWAM">Rachel (Female, Calm) - Default</option>
+                        <option value="EXAVITQu4vr4xnSDxMaL">Bella (Female, Soft)</option>
+                        <option value="pNInz6obpgDQGcFmaJgB">Adam (Male, News)</option>
+                        <option value="TX3LPaxmHKxFdv7VOQHJ">Charlie (Male, Casual)</option>
+                        <option value="jsCqWAovK2LkecY7zXl4">Freya (Female, Professional)</option>
+                        <option value="cgSgspJ2msm6clMCkdW9">Jessica (Female, Expressive)</option>
                     </select>
                     <p class="help-text">
-                        Choose your preferred voice for the conversational agent (Thalia recommended)
+                        Choose your preferred voice for the assistant. Explore more voices at
+                        <a href="https://elevenlabs.io/voice-library" target="_blank">ElevenLabs Voice Library</a>
                     </p>
                 </div>
             </div>

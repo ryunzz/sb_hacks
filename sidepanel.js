@@ -18,17 +18,15 @@ const closeModalBtn = document.getElementById('closeModal');
 // State
 let isListening = false;
 let isMuted = false;
-let deepgramSocket = null;
-let mediaRecorder = null;
-let audioStream = null;
-let deepgramApiKey = '';
+let elevenlabsApiKey = '';
 let selectedLanguage = 'en';
-let selectedVoice = 'aura-asteria-en';
+let selectedVoice = '21m00Tcm4TlvDq8ikWAM'; // Rachel - ElevenLabs default
 let currentAudioQueue = [];
 let isPlayingAudio = false;
 let fillerTimeout = null;
 let currentUserMessageId = null; // Track the current user message being spoken
 let currentLoadingMessageId = null; // Track the loading message for responses
+let currentRecognition = null; // Track the current Web Speech Recognition instance
 
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
@@ -51,98 +49,32 @@ function setupOffscreenListeners() {
                 break;
 
             case 'transcript-update':
-                // Real-time transcript updates (interim and final)
-                console.log('Transcript update received:', message.transcript, 'isFinal:', message.isFinal);
-                if (message.transcript) {
-                    // Update text input in real-time as user speaks
-                    textInput.value = message.transcript;
-                    
-                    // Show visual feedback that we're receiving audio
-                    if (!message.isFinal) {
-                        textInput.style.borderColor = '#4f9eff';
-                        textInput.style.borderWidth = '2px';
-                    } else {
-                        textInput.style.borderColor = '#10b981';
-                        textInput.style.borderWidth = '2px';
-                    }
-                    
-                    // Show transcript in messages area in real-time
-                    if (!currentUserMessageId) {
-                        // Create new user message for the transcript
-                        currentUserMessageId = addMessage('user', message.transcript, false);
-                    } else {
-                        // Update existing user message with latest transcript
-                        const messageEl = document.getElementById(currentUserMessageId);
-                        if (messageEl) {
-                            const contentEl = messageEl.querySelector('.message-content');
-                            if (contentEl) {
-                                contentEl.textContent = message.transcript;
-                                // Add visual indicator for interim results
-                                if (!message.isFinal) {
-                                    messageEl.classList.add('interim');
-                                } else {
-                                    messageEl.classList.remove('interim');
-                                }
-                                // Scroll to bottom
-                                messagesContainer.scrollTop = messagesContainer.scrollHeight;
-                            }
-                        }
-                    }
-                }
+                // Note: Web Speech API does not support interim results
+                // This case is kept for backward compatibility but unused
                 break;
 
             case 'transcript-result':
                 // Final transcript when recording stops - auto-send the message
                 console.log('Final transcript received:', message.transcript);
-                
-                // Reset border styling
-                textInput.style.borderColor = '';
-                textInput.style.borderWidth = '';
-                
+
                 // Reset listening state
                 isListening = false;
                 voiceBtn.classList.remove('listening');
                 voiceBtn.querySelector('.voice-text').textContent = 'Start Recording';
                 voiceBtn.setAttribute('aria-label', 'Start recording');
                 voiceBtn.setAttribute('title', 'Click to start recording');
-                
+
                 if (message.transcript && message.transcript.trim()) {
                     const finalText = message.transcript.trim();
-                    
-                    // Update the user message with final transcript (remove interim styling)
-                    if (currentUserMessageId) {
-                        const messageEl = document.getElementById(currentUserMessageId);
-                        if (messageEl) {
-                            const contentEl = messageEl.querySelector('.message-content');
-                            if (contentEl) {
-                                contentEl.textContent = finalText;
-                                messageEl.classList.remove('interim');
-                            }
-                        }
-                    } else {
-                        // No existing message, create one
-                        currentUserMessageId = addMessage('user', finalText, false);
-                    }
-                    
-                    // Clear the input
-                    textInput.value = '';
-                    
-                    // Store the message ID before sending
-                    const messageIdToSend = currentUserMessageId;
-                    
-                    // Reset user message tracking BEFORE sending (to prevent conflicts)
-                    currentUserMessageId = null;
-                    
+
+                    // Add user message with final transcript
+                    addMessage('user', finalText);
+
                     // Auto-send the message immediately
                     console.log('Auto-sending transcript:', finalText);
-                    handleUserInput(finalText, messageIdToSend);
+                    handleUserInput(finalText);
                     setStatus('Message sent');
                 } else {
-                    // No transcript, remove the user message if it exists
-                    if (currentUserMessageId) {
-                        removeMessage(currentUserMessageId);
-                        currentUserMessageId = null;
-                    }
                     setStatus('Ready to help');
                 }
                 break;
@@ -194,17 +126,15 @@ function setupOffscreenListeners() {
 async function loadConfig() {
     try {
         const config = await chrome.storage.local.get([
-            'deepgramApiKey',
+            'elevenlabsApiKey',
             'voiceMuted',
             'language',
-            'voiceModel'
+            'voiceId'
         ]);
-        deepgramApiKey = config.deepgramApiKey || '';
+        elevenlabsApiKey = config.elevenlabsApiKey || '';
         isMuted = config.voiceMuted || false;
         selectedLanguage = config.language || 'en';
-        // Fix invalid voice model - migrate from old config
-        const storedVoice = config.voiceModel || 'aura-asteria-en';
-        selectedVoice = (storedVoice === 'aura-thalia-en') ? 'aura-asteria-en' : storedVoice;
+        selectedVoice = config.voiceId || '21m00Tcm4TlvDq8ikWAM'; // Rachel default
         updateMuteButton();
     } catch (error) {
         console.error('Failed to load config:', error);
@@ -336,15 +266,9 @@ async function requestMicrophonePermission() {
 async function startListening() {
     if (isListening) return;
 
-    // Check for API key
-    if (!deepgramApiKey) {
-        addMessage('assistant', 'Please set up your Deepgram API key in settings to use voice input. You can still type messages below.');
-        speak('Please set up your Deepgram API key in settings to use voice input.');
-        return;
-    }
+    // Note: No API key needed for Web Speech API (browser-native)
 
     // Check microphone permission first
-    // Based on: https://github.com/justinmann/sidepanel-audio-issue
     const hasPermission = await checkMicrophonePermission();
     if (!hasPermission) {
         addMessage('assistant', 'Microphone permission is required. Opening permission request page...');
@@ -358,48 +282,78 @@ async function startListening() {
     voiceBtn.querySelector('.voice-text').textContent = 'Stop Recording';
     voiceBtn.setAttribute('aria-label', 'Stop recording');
     voiceBtn.setAttribute('title', 'Click to stop recording');
-    
+
     // Clear text input to prepare for new transcript
     textInput.value = '';
     textInput.style.borderColor = '';
     textInput.style.borderWidth = '';
-    
+
     // Reset user message tracking for new recording session
     currentUserMessageId = null;
-    
+
     setStatus('Listening... Speak now');
 
     try {
-        // Request recording via background script (which uses offscreen document)
-        const response = await chrome.runtime.sendMessage({
-            type: 'start-recording',
-            language: selectedLanguage
-        });
+        // Use Web Speech API directly in sidepanel (not offscreen)
+        // Web Speech API requires direct user gesture context
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
-        if (!response || !response.success) {
-            throw new Error(response?.error || 'Failed to start recording');
+        if (!SpeechRecognition) {
+            throw new Error('Web Speech API is not supported in this browser. Please use Chrome or Edge.');
         }
+
+        currentRecognition = new SpeechRecognition();
+        currentRecognition.continuous = false;
+        currentRecognition.interimResults = false;
+        currentRecognition.lang = mapLanguageCode(selectedLanguage);
+        currentRecognition.maxAlternatives = 1;
+
+        currentRecognition.onresult = (event) => {
+            const transcript = event.results[0][0].transcript;
+            console.log('Web Speech: Final transcript:', transcript);
+
+            if (transcript && transcript.trim()) {
+                addMessage('user', transcript.trim());
+                handleUserInput(transcript.trim());
+                setStatus('Message sent');
+            }
+
+            isListening = false;
+            voiceBtn.classList.remove('listening');
+            voiceBtn.querySelector('.voice-text').textContent = 'Start Recording';
+            currentRecognition = null;
+        };
+
+        currentRecognition.onerror = (event) => {
+            console.error('Web Speech error:', event.error);
+            let errorMessage = 'Speech recognition failed. Please try again.';
+
+            if (event.error === 'no-speech') {
+                errorMessage = 'No speech detected. Please try again and speak clearly.';
+            } else if (event.error === 'not-allowed') {
+                errorMessage = 'Microphone permission denied. Please allow microphone access in your browser settings.';
+            } else if (event.error === 'network') {
+                errorMessage = 'Network error. Web Speech API requires internet connection.';
+            }
+
+            addMessage('assistant', errorMessage);
+            stopListening();
+        };
+
+        currentRecognition.onend = () => {
+            console.log('Web Speech: Recognition ended');
+            if (isListening) {
+                stopListening();
+            }
+        };
+
+        currentRecognition.start();
+        console.log('Web Speech: Started recognition');
 
     } catch (error) {
         console.error('Start recording error:', error);
-        const errorMsg = error.message || 'Could not access microphone. Please check your permissions.';
+        const errorMsg = error.message || 'Could not start speech recognition. Please check your browser settings.';
         addMessage('assistant', errorMsg);
-        
-        // If permission error, offer to request permission again
-        if (error.message && (error.message.includes('permission') || error.message.includes('NotAllowed'))) {
-            setTimeout(() => {
-                const retryBtn = document.createElement('button');
-                retryBtn.textContent = '🔧 Request Microphone Permission';
-                retryBtn.className = 'quick-btn';
-                retryBtn.style.marginTop = '8px';
-                retryBtn.onclick = () => requestMicrophonePermission();
-                const lastMessage = messagesContainer.lastElementChild;
-                if (lastMessage) {
-                    lastMessage.querySelector('.message-content').appendChild(retryBtn);
-                }
-            }, 100);
-        }
-        
         stopListening();
     }
 }
@@ -417,8 +371,11 @@ function stopListening() {
     voiceBtn.setAttribute('title', 'Click to start recording');
     setStatus('Processing...');
 
-    // Tell background/offscreen to stop recording
-    chrome.runtime.sendMessage({ type: 'stop-recording' });
+    // Stop the Web Speech Recognition instance
+    if (currentRecognition) {
+        currentRecognition.stop();
+        currentRecognition = null;
+    }
 }
 
 /**
@@ -765,70 +722,69 @@ async function speak(text) {
     // Stop any ongoing speech
     stopAllAudio();
 
-    if (!deepgramApiKey) {
-        console.warn('No Deepgram API key for TTS');
+    if (!elevenlabsApiKey) {
+        console.warn('No ElevenLabs API key for TTS');
         return;
     }
 
     try {
-        // Validate API key
-        if (!deepgramApiKey || deepgramApiKey.trim() === '') {
-            console.warn('No Deepgram API key for TTS');
-            return;
-        }
-
         // Split text into chunks if it's too long
         const chunks = chunkText(text.trim(), 1900); // Use 1900 to be safe (under 2000 limit)
-        
+
         console.log(`TTS: Splitting text into ${chunks.length} chunk(s)`);
 
         // Process chunks sequentially
         for (let i = 0; i < chunks.length; i++) {
             const chunk = chunks[i];
-            
-            const response = await fetch('https://api.deepgram.com/v1/speak?model=' + selectedVoice, {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Token ${deepgramApiKey}`,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    text: chunk
-                })
-            });
+            const voiceId = selectedVoice || '21m00Tcm4TlvDq8ikWAM'; // Rachel default
+
+            const response = await fetch(
+                `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
+                {
+                    method: 'POST',
+                    headers: {
+                        'xi-api-key': elevenlabsApiKey,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        text: chunk,
+                        model_id: 'eleven_multilingual_v2',
+                        voice_settings: {
+                            stability: 0.5,
+                            similarity_boost: 0.5
+                        }
+                    })
+                }
+            );
 
             if (!response.ok) {
                 const errorText = await response.text();
-                console.error('TTS API error:', response.status, errorText);
-                
-                // For 400 errors (bad model name), fail silently and don't throw
-                if (response.status === 400) {
-                    console.warn('TTS model not available, skipping speech output');
+                console.error('ElevenLabs TTS API error:', response.status, errorText);
+
+                // For 401 errors (invalid API key), fail silently
+                if (response.status === 401) {
+                    console.error('ElevenLabs: Invalid API key');
                     return;
                 }
-                
+
+                // For 403 errors (quota exceeded), fail silently
+                if (response.status === 403) {
+                    console.error('ElevenLabs: Quota exceeded');
+                    return;
+                }
+
                 // For 413 errors (payload too large), try to chunk even smaller
                 if (response.status === 413) {
                     console.warn('TTS chunk still too large, splitting further...');
-                    // Recursively split this chunk into smaller pieces
                     const smallerChunks = chunkText(chunk, 1000);
                     for (const smallerChunk of smallerChunks) {
                         await speakChunk(smallerChunk);
                     }
                     continue;
                 }
-                
-                let errorMessage = 'TTS request failed';
-                if (response.status === 401) {
-                    errorMessage = 'Deepgram API key is invalid. Please check your settings.';
-                } else if (response.status === 403) {
-                    errorMessage = 'Deepgram API key does not have TTS permissions.';
-                } else if (response.status >= 500) {
-                    errorMessage = 'Deepgram service is temporarily unavailable. Please try again later.';
-                }
-                
+
                 // Don't throw for TTS errors - just log and continue
-                console.warn('TTS error (non-critical):', errorMessage);
+                console.warn('TTS error (non-critical):', response.status);
                 return;
             }
 
@@ -872,19 +828,29 @@ async function speak(text) {
  * Helper function to speak a single chunk (used for recursive splitting)
  */
 async function speakChunk(chunk) {
-    if (!deepgramApiKey || !chunk.trim()) return;
+    if (!elevenlabsApiKey || !chunk.trim()) return;
 
     try {
-        const response = await fetch('https://api.deepgram.com/v1/speak?model=' + selectedVoice, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Token ${deepgramApiKey}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                text: chunk
-            })
-        });
+        const voiceId = selectedVoice || '21m00Tcm4TlvDq8ikWAM'; // Rachel default
+
+        const response = await fetch(
+            `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
+            {
+                method: 'POST',
+                headers: {
+                    'xi-api-key': elevenlabsApiKey,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    text: chunk,
+                    model_id: 'eleven_monolingual_v1',
+                    voice_settings: {
+                        stability: 0.5,
+                        similarity_boost: 0.5
+                    }
+                })
+            }
+        );
 
         if (!response.ok) {
             console.error('TTS API error for chunk:', response.status);
@@ -986,4 +952,27 @@ function showMicPermissionModal() {
  */
 function hideMicPermissionModal() {
     micPermissionModal.classList.remove('visible');
+}
+
+/**
+ * Map language codes from ISO 639-1 to BCP 47 format for Web Speech API
+ */
+function mapLanguageCode(lang) {
+    const languageMap = {
+        'en': 'en-US',
+        'es': 'es-ES',
+        'fr': 'fr-FR',
+        'de': 'de-DE',
+        'it': 'it-IT',
+        'pt': 'pt-BR',
+        'nl': 'nl-NL',
+        'pl': 'pl-PL',
+        'ru': 'ru-RU',
+        'ja': 'ja-JP',
+        'ko': 'ko-KR',
+        'zh': 'zh-CN',
+        'hi': 'hi-IN',
+        'ar': 'ar-SA'
+    };
+    return languageMap[lang] || 'en-US';
 }

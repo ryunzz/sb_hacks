@@ -10,23 +10,23 @@ let conversationHistory = [];
 let geminiClient = null;
 let config = {
     geminiApiKey: '',
-    deepgramApiKey: ''
+    elevenlabsApiKey: ''
 };
 
 // Load config from storage
 async function loadConfig() {
-    const stored = await chrome.storage.local.get(['geminiApiKey', 'deepgramApiKey']);
+    const stored = await chrome.storage.local.get(['geminiApiKey', 'elevenlabsApiKey']);
     config.geminiApiKey = stored.geminiApiKey || '';
-    config.deepgramApiKey = stored.deepgramApiKey || '';
+    config.elevenlabsApiKey = stored.elevenlabsApiKey || '';
 
     if (config.geminiApiKey) {
         initGemini();
     }
-    
+
     console.log('Config loaded:', {
         hasGeminiKey: !!config.geminiApiKey,
-        hasDeepgramKey: !!config.deepgramApiKey,
-        deepgramKeyLength: config.deepgramApiKey ? config.deepgramApiKey.length : 0
+        hasElevenLabsKey: !!config.elevenlabsApiKey,
+        elevenlabsKeyLength: config.elevenlabsApiKey ? config.elevenlabsApiKey.length : 0
     });
 }
 
@@ -53,9 +53,9 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
                 initGemini();
             }
         }
-        if (changes.deepgramApiKey) {
-            config.deepgramApiKey = changes.deepgramApiKey.newValue || '';
-            console.log('Deepgram API key updated in config');
+        if (changes.elevenlabsApiKey) {
+            config.elevenlabsApiKey = changes.elevenlabsApiKey.newValue || '';
+            console.log('ElevenLabs API key updated in config');
         }
     }
 });
@@ -130,65 +130,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         case 'start-recording':
             // Create offscreen document and start recording
+            // Note: No API key needed for Web Speech API (browser-native)
             setupOffscreenDocument().then(async () => {
                 // Ensure offscreen is ready
                 if (!offscreenReady) {
                     await new Promise(resolve => setTimeout(resolve, 200));
                 }
-                
-                // Always fetch the latest API key from storage (in case it was updated in settings)
-                const stored = await chrome.storage.local.get(['deepgramApiKey']);
-                const currentDeepgramApiKey = stored.deepgramApiKey || config.deepgramApiKey || '';
-                
-                // Update config for future use
-                if (stored.deepgramApiKey) {
-                    config.deepgramApiKey = stored.deepgramApiKey;
-                }
-                
-                // Log API key status for debugging
-                console.log('Background: API key check:', {
-                    hasStoredKey: !!stored.deepgramApiKey,
-                    storedKeyType: typeof stored.deepgramApiKey,
-                    storedKeyLength: stored.deepgramApiKey ? stored.deepgramApiKey.length : 0,
-                    hasConfigKey: !!config.deepgramApiKey,
-                    configKeyLength: config.deepgramApiKey ? config.deepgramApiKey.length : 0,
-                    currentKeyLength: currentDeepgramApiKey ? currentDeepgramApiKey.length : 0,
-                    currentKeyPreview: currentDeepgramApiKey ? currentDeepgramApiKey.substring(0, 10) + '...' : 'none',
-                    allStorageKeys: Object.keys(stored)
-                });
-                
-                // Check if API key exists
-                if (!currentDeepgramApiKey || currentDeepgramApiKey.trim() === '') {
-                    console.error('Background: Deepgram API key is missing from storage!');
-                    console.error('Background: Storage contents:', stored);
-                    sendResponse({ 
-                        success: false, 
-                        error: 'Deepgram API key is required. Please configure it in settings (click the gear icon).' 
-                    });
-                    return;
-                }
-                
+
                 // Send message to offscreen document
-                // The offscreen document will send 'recording-started' or 'recording-error' messages
-                // which the sidepanel already listens for
                 const messageToSend = {
                     type: 'start-recording',
-                    deepgramApiKey: currentDeepgramApiKey,
                     language: message.language || 'en'
                 };
-                
-                console.log('Background: Sending message to offscreen:', {
-                    type: messageToSend.type,
-                    hasApiKey: !!messageToSend.deepgramApiKey,
-                    apiKeyLength: messageToSend.deepgramApiKey ? messageToSend.deepgramApiKey.length : 0,
+
+                console.log('Background: Starting Web Speech API recording:', {
                     language: messageToSend.language
                 });
-                
+
                 chrome.runtime.sendMessage(messageToSend).catch(error => {
                     console.error('Failed to send message to offscreen:', error);
                     sendResponse({ success: false, error: 'Failed to communicate with offscreen document' });
                 });
-                
+
                 // Respond immediately - actual result will come via 'recording-started' or 'recording-error' messages
                 sendResponse({ success: true });
             }).catch(error => {
