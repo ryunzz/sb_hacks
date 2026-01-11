@@ -90,8 +90,10 @@ class PlaywrightCDPComputer(Computer):
         Some websites, however, try to open links in a new tab.
         For those situations, we intercept the page-opening behavior, and instead overwrite the current page.
         """
+        print(f"[CDP] Intercepted new page opening: {new_page.url}")
         new_url = new_page.url
         new_page.close()
+        print(f"[CDP] Closed new page, redirecting current tab to: {new_url}")
         self._page.goto(new_url)
 
     def __enter__(self):
@@ -112,15 +114,30 @@ class PlaywrightCDPComputer(Computer):
                 "Is Chrome running with --remote-debugging-port=9222?"
             )
 
-        # Get active page (or create if none exist)
-        pages = self._context.pages
-        if not pages:
-            self._page = self._context.new_page()
-        else:
-            self._page = pages[-1]  # Most recently used tab
-
-        # Intercept new tabs (single-tab mode)
+        # 🔥 FIX 1: Register interceptor FIRST, before fetching pages
+        # This prevents race conditions where windows open during setup
         self._context.on("page", self._handle_new_page)
+        print(f"[CDP] Interceptor set up for new pages")
+
+        # NOW fetch pages (any new windows will be intercepted)
+        # We don't create new pages because new_page() creates a new WINDOW (Cmd+N)
+        # instead of a new tab, and new windows don't have the extension loaded
+        pages = self._context.pages
+        print(f"[CDP] Found {len(pages)} existing pages/tabs in context")
+
+        if not pages:
+            raise RuntimeError(
+                "No tabs found in Chrome! Please open at least one tab before using the agent.\n"
+                "The agent will use your currently active tab."
+            )
+
+        # Use the most recently active tab
+        self._page = pages[-1]
+        print(f"[CDP] Using active tab: {self._page.url}")
+
+        # 🔥 FIX 2: Close any spurious blank windows that may have opened
+        # This handles windows created BEFORE the interceptor was registered
+        self._close_spurious_windows()
 
         termcolor.cprint(
             f"✓ Connected to existing Chrome! Using tab: {self._page.url}",

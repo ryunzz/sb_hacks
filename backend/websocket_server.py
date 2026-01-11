@@ -156,6 +156,11 @@ class WebSocketServer:
         Args:
             task: User task description
         """
+        # CRITICAL FIX: Clear asyncio event loop in this thread
+        # Even though we're in ThreadPoolExecutor, Playwright can detect parent's loop
+        # This explicitly tells Playwright we're in a pure sync context
+        asyncio.set_event_loop(None)
+
         print(f"[WebSocket] Starting agent task in thread pool: {task}")
         self.agent_running = True
 
