@@ -1,0 +1,13 @@
+# Core dependencies
+python-dotenv==1.0.0
+google-genai
+
+# WebSocket server
+websockets==13.1
+aiohttp==3.10.11
+
+# Browser automation
+playwright==1.52.0
+
+# Optional: Direct Deepgram integration
+deepgram-sdk==3.10.0

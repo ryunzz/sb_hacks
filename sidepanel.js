@@ -30,6 +30,7 @@ let isPlayingAudio = false;
 let fillerTimeout = null;
 let currentUserMessageId = null; // Track the current user message being spoken
 let currentLoadingMessageId = null; // Track the loading message for responses
+let isAgentActive = false; // Track if Computer Use agent is actively working
 
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
@@ -153,6 +154,56 @@ function setupOffscreenListeners() {
                 console.log('Microphone permission granted');
                 addMessage('assistant', '✅ Microphone permission granted! You can now use voice input.');
                 speak('Microphone permission granted. You can now use voice input.');
+                break;
+
+            case 'agent-narration':
+                // Agent is narrating its actions
+                console.log('[Agent] Narration:', message.text, '(timing:', message.timing, ')');
+                // Speak the narration via TTS
+                speak(message.text);
+                // Optionally show in UI based on timing
+                if (message.timing === 'observation' || message.timing === 'completion') {
+                    addMessage('assistant', message.text);
+                }
+                break;
+
+            case 'agent-action':
+                // Agent is performing an action
+                console.log('[Agent] Action:', message.action, '-', message.description);
+                // Show action in status or UI (optional - can be verbose)
+                setStatus(message.description || 'Working...');
+                break;
+
+            case 'agent-complete':
+                // Agent completed the task
+                console.log('[Agent] Task complete:', message.success, '-', message.summary);
+                const completionMsg = message.success
+                    ? `✅ Task completed: ${message.summary}`
+                    : `❌ Task failed: ${message.summary}`;
+                addMessage('assistant', completionMsg);
+                speak(message.summary);
+                setStatus('Ready to help');
+                break;
+
+            case 'agent-error':
+                // Agent encountered an error
+                console.error('[Agent] Error:', message.message);
+                addMessage('assistant', `❌ Error: ${message.message}`);
+                speak(`Error: ${message.message}`);
+                setStatus('Ready to help');
+                break;
+
+            case 'agent-state-update':
+                // Agent state changed (active/inactive)
+                console.log('[Agent] State update - isActive:', message.isActive);
+                // Update global state
+                isAgentActive = message.isActive;
+                // Update UI state indicator if needed
+                if (message.isActive) {
+                    setStatus('Agent is working...');
+                } else {
+                    setStatus('Ready to help');
+                }
                 break;
         }
     });
@@ -458,6 +509,30 @@ async function handleUserInput(input, existingUserMessageId = null) {
 
     try {
         console.log('Sending message to background:', input);
+
+        // Check if agent is currently active - if so, this is an interruption
+        const isInterruption = isAgentActive;
+
+        if (isInterruption) {
+            console.log('[Interruption] Agent is active - sending interruption to backend');
+            // Send interruption directly to backend
+            const response = await chrome.runtime.sendMessage({
+                type: 'interrupt',
+                new_instruction: input
+            });
+            // Update the loading message immediately
+            if (currentLoadingMessageId) {
+                const loadingEl = document.getElementById(currentLoadingMessageId);
+                if (loadingEl) {
+                    const contentEl = loadingEl.querySelector('.message-content');
+                    if (contentEl) {
+                        contentEl.textContent = 'Interrupting current task...';
+                    }
+                }
+            }
+            return; // Don't continue with normal flow
+        }
+
         const response = await chrome.runtime.sendMessage({
             type: 'message',
             content: input

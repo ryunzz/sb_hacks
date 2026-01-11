@@ -13,6 +13,17 @@ let config = {
     deepgramApiKey: ''
 };
 
+// WebSocket Backend Connection
+let wsConnection = null;
+let isAgentActive = false;
+const WS_URL = 'ws://localhost:8000';
+
+// Agent state for interruption detection
+let agentState = {
+    isActive: false,
+    currentTask: null
+};
+
 // Load config from storage
 async function loadConfig() {
     const stored = await chrome.storage.local.get(['geminiApiKey', 'deepgramApiKey']);
@@ -44,6 +55,9 @@ chrome.runtime.onInstalled.addListener(async () => {
 // Also load config on startup (in case extension was reloaded)
 loadConfig();
 
+// Connect to Python backend
+connectToBackend();
+
 // Listen for storage changes to keep config in sync
 chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName === 'local') {
@@ -73,6 +87,93 @@ function initGemini() {
         console.log('Gemini initialized');
     } catch (error) {
         console.error('Failed to initialize Gemini:', error);
+    }
+}
+
+// WebSocket Backend Connection Functions
+async function connectToBackend() {
+    try {
+        wsConnection = new WebSocket(WS_URL);
+
+        wsConnection.onopen = () => {
+            console.log('[Backend] Connected to Python backend');
+        };
+
+        wsConnection.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            handleBackendMessage(data);
+        };
+
+        wsConnection.onerror = (error) => {
+            console.error('[Backend] WebSocket error:', error);
+        };
+
+        wsConnection.onclose = () => {
+            console.log('[Backend] Disconnected, reconnecting in 2s...');
+            setTimeout(connectToBackend, 2000);
+        };
+    } catch (error) {
+        console.error('[Backend] Connection failed:', error);
+        setTimeout(connectToBackend, 5000);  // Retry after 5s
+    }
+}
+
+function handleBackendMessage(data) {
+    switch (data.type) {
+        case 'narration':
+            agentState.isActive = true;
+            // Send narration text to sidepanel for TTS
+            chrome.runtime.sendMessage({
+                type: 'agent-narration',
+                text: data.text,
+                timing: data.timing
+            }).catch(() => {});  // Ignore if sidepanel not open
+            break;
+
+        case 'action':
+            // Optional: Show action in UI
+            chrome.runtime.sendMessage({
+                type: 'agent-action',
+                action: data.action,
+                description: data.description
+            }).catch(() => {});
+            break;
+
+        case 'task_complete':
+            agentState.isActive = false;
+            agentState.currentTask = null;
+            chrome.runtime.sendMessage({
+                type: 'agent-complete',
+                success: data.success,
+                summary: data.summary
+            }).catch(() => {});
+            break;
+
+        case 'error':
+            chrome.runtime.sendMessage({
+                type: 'agent-error',
+                message: data.message
+            }).catch(() => {});
+            break;
+    }
+
+    // Broadcast state to offscreen for interruption detection
+    chrome.runtime.sendMessage({
+        type: 'agent-state-update',
+        isActive: agentState.isActive
+    }).catch(() => {});
+}
+
+function sendToBackend(message) {
+    if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
+        wsConnection.send(JSON.stringify(message));
+    } else {
+        console.error('[Backend] Not connected to Python backend');
+        // Show error to user
+        chrome.runtime.sendMessage({
+            type: 'agent-error',
+            message: 'Python backend not connected. Please ensure the backend server is running.'
+        }).catch(() => {});
     }
 }
 
@@ -230,6 +331,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sendResponse({ success: true });
             return true;
 
+        case 'interrupt':
+            // User is interrupting the agent's current task
+            console.log('[Interrupt] User interrupting with:', message.new_instruction);
+            sendToBackend({
+                type: 'interrupt',
+                new_instruction: message.new_instruction,
+                timestamp: Date.now()
+            });
+            sendResponse({ success: true });
+            return true;
 
         default:
             sendResponse({
@@ -329,15 +440,31 @@ async function handleUserMessage(userInput) {
             content: userInput
         });
 
-        // Check if this is an action request
+        // Check if this is a computer use request (complex autonomous task)
         const lowerInput = userInput.toLowerCase().trim();
-        const isAction =
+        const isComputerUse =
             lowerInput.includes('go to') ||
             lowerInput.includes('click') ||
             lowerInput.includes('type') ||
             lowerInput.includes('scroll') ||
             lowerInput.includes('navigate') ||
-            lowerInput.includes('open');
+            lowerInput.includes('open') ||
+            lowerInput.includes('help me') ||
+            lowerInput.includes('pay') ||
+            lowerInput.includes('fill out') ||
+            lowerInput.includes('submit') ||
+            lowerInput.includes('login') ||
+            lowerInput.includes('log in') ||
+            lowerInput.includes('sign in') ||
+            lowerInput.includes('sign up') ||
+            lowerInput.includes('search for') ||
+            lowerInput.includes('find me') ||
+            lowerInput.includes('book') ||
+            lowerInput.includes('order') ||
+            lowerInput.includes('purchase') ||
+            lowerInput.includes('add to cart') ||
+            lowerInput.includes('checkout') ||
+            lowerInput.includes('complete');
 
         // Check if this is a request to describe the page/screen or answer questions about what's visible
         // This should be VERY broad - when in doubt, use vision!
@@ -401,7 +528,7 @@ async function handleUserMessage(userInput) {
             ));
 
         console.log('Message routing:', {
-            isAction,
+            isComputerUse,
             isDescribeRequest,
             input: userInput.substring(0, 50),
             lowerInput: lowerInput.substring(0, 50),
@@ -414,9 +541,18 @@ async function handleUserMessage(userInput) {
             }
         });
 
-        if (isAction) {
-            console.log('Routing to action handler');
-            return await handleActionRequest(userInput);
+        if (isComputerUse) {
+            // Route to Python backend for Gemini 2.5 Computer Use
+            console.log('[handleUserMessage] Routing to Computer Use backend');
+            sendToBackend({
+                type: 'user_message',
+                text: userInput,
+                timestamp: Date.now()
+            });
+            return {
+                type: 'response',
+                message: 'Starting task...'
+            };
         } else if (isDescribeRequest) {
             console.log('Routing to describe handler (VISION MODEL)');
             return await describeActiveTab(userInput);
