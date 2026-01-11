@@ -167,7 +167,8 @@ class WebSocketServer:
         try:
             # Create CDP computer with context manager
             # This connects to user's existing Chrome with extension loaded!
-            with PlaywrightCDPComputer() as computer:
+            # Enable mouse highlighting so user sees interactions
+            with PlaywrightCDPComputer(highlight_mouse=True) as computer:
                 print("[WebSocket] ✓ Connected to Chrome via CDP")
 
                 # Create sync BrowserAgent

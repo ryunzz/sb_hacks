@@ -402,6 +402,7 @@ class BrowserAgent:
             return False
 
         # Check if last 5 actions are identical
+        # We stringify names (and args if we tracked them) to compare
         last_five = self.action_history[-5:]
         return len(set(last_five)) == 1
 
