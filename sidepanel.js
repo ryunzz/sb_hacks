@@ -20,6 +20,18 @@ let mediaRecorder = null;
 let audioStream = null;
 let deepgramApiKey = '';
 
+// TTS state variables
+let ttsSocket = null;
+let ttsAudioContext = null;
+let ttsAudioQueue = [];
+let ttsIsPlaying = false;
+let ttsCurrentSource = null;
+let ttsPendingMessages = [];
+let ttsNextStartTime = 0;
+const TTS_MODEL = 'aura-thalia-en';
+const TTS_ENCODING = 'linear16';
+const TTS_SAMPLE_RATE = 16000;
+
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
     await loadConfig();
@@ -130,16 +142,16 @@ async function startListening() {
             }
         });
 
-        // Connect to Deepgram WebSocket
+        // Connect to Deepgram WebSocket (Flux model on v2 endpoint)
         deepgramSocket = new WebSocket(
-            'wss://api.deepgram.com/v1/listen?model=nova-2&punctuate=true&smart_format=true',
+            'wss://api.deepgram.com/v2/listen?model=flux-general-en&punctuate=true&smart_format=true&encoding=opus&sample_rate=16000',
             ['token', deepgramApiKey]
         );
 
         let transcript = '';
 
         deepgramSocket.onopen = () => {
-            console.log('Deepgram connected');
+            console.log('Deepgram Flux connected');
 
             // Start MediaRecorder
             mediaRecorder = new MediaRecorder(audioStream, {
@@ -152,7 +164,7 @@ async function startListening() {
                 }
             };
 
-            mediaRecorder.start(250); // Send chunks every 250ms
+            mediaRecorder.start(80); // Send chunks every 80ms (optimal for Flux)
         };
 
         deepgramSocket.onmessage = (event) => {
@@ -315,12 +327,210 @@ function setStatus(text) {
 }
 
 /**
- * Text-to-speech
+ * Initialize TTS WebSocket connection
  */
-function speak(text) {
+async function initTTSConnection() {
+    if (ttsSocket && ttsSocket.readyState === WebSocket.OPEN) {
+        return true; // Already connected
+    }
+
+    try {
+        console.log('[TTS] Connecting to Deepgram TTS...');
+
+        // Build WebSocket URL with parameters
+        const ttsUrl = `wss://api.deepgram.com/v1/speak?model=${TTS_MODEL}&encoding=${TTS_ENCODING}&sample_rate=${TTS_SAMPLE_RATE}`;
+
+        ttsSocket = new WebSocket(ttsUrl, ['token', deepgramApiKey]);
+        ttsSocket.binaryType = 'arraybuffer'; // Receive audio as ArrayBuffer
+
+        return new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+                reject(new Error('TTS connection timeout'));
+            }, 5000);
+
+            ttsSocket.onopen = () => {
+                clearTimeout(timeout);
+                console.log('[TTS] Connected to Deepgram TTS');
+
+                // Initialize Web Audio API
+                if (!ttsAudioContext) {
+                    ttsAudioContext = new (window.AudioContext || window.webkitAudioContext)({
+                        sampleRate: TTS_SAMPLE_RATE
+                    });
+                }
+
+                resolve(true);
+            };
+
+            ttsSocket.onmessage = handleTTSMessage;
+
+            ttsSocket.onerror = (error) => {
+                clearTimeout(timeout);
+                console.error('[TTS] WebSocket error:', error);
+                reject(error);
+            };
+
+            ttsSocket.onclose = (event) => {
+                console.log('[TTS] WebSocket closed:', event.code, event.reason);
+                ttsSocket = null;
+
+                // Attempt reconnect if not intentional closure and messages pending
+                if (event.code !== 1000 && ttsPendingMessages.length > 0) {
+                    setTimeout(() => {
+                        console.log('[TTS] Attempting reconnect...');
+                        const nextMessage = ttsPendingMessages.shift();
+                        sendTTSText(nextMessage);
+                    }, 1000);
+                }
+            };
+        });
+    } catch (error) {
+        console.error('[TTS] Connection error:', error);
+        return false;
+    }
+}
+
+/**
+ * Handle incoming TTS WebSocket messages (audio chunks)
+ */
+function handleTTSMessage(event) {
+    if (event.data instanceof ArrayBuffer) {
+        // Received audio data
+        if (event.data.byteLength > 0) {
+            ttsAudioQueue.push(event.data);
+
+            // Start playback if not already playing
+            if (!ttsIsPlaying) {
+                playTTSAudioQueue();
+            }
+        }
+    } else {
+        // Received JSON metadata
+        try {
+            const message = JSON.parse(event.data);
+            console.log('[TTS] Metadata:', message);
+
+            if (message.type === 'Flushed') {
+                console.log('[TTS] Flush complete, audio queued');
+            } else if (message.type === 'Metadata') {
+                console.log('[TTS] Audio metadata:', message);
+            } else if (message.type === 'Warning') {
+                console.warn('[TTS] Warning:', message.warn_msg);
+            }
+        } catch (e) {
+            console.error('[TTS] Failed to parse metadata:', e);
+        }
+    }
+}
+
+/**
+ * Play queued TTS audio chunks
+ */
+async function playTTSAudioQueue() {
+    if (ttsIsPlaying || ttsAudioQueue.length === 0 || !ttsAudioContext) {
+        return;
+    }
+
+    ttsIsPlaying = true;
+
+    try {
+        while (ttsAudioQueue.length > 0) {
+            if (isMuted) {
+                // Clear queue if muted
+                ttsAudioQueue = [];
+                break;
+            }
+
+            const audioData = ttsAudioQueue.shift();
+
+            // Decode audio data
+            const audioBuffer = await ttsAudioContext.decodeAudioData(audioData);
+
+            // Create audio source
+            const source = ttsAudioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(ttsAudioContext.destination);
+
+            // Track current source for interruption
+            ttsCurrentSource = source;
+
+            // Schedule playback
+            const currentTime = ttsAudioContext.currentTime;
+            const startTime = Math.max(currentTime, ttsNextStartTime);
+
+            // Play audio
+            source.start(startTime);
+
+            // Calculate next start time for seamless playback
+            ttsNextStartTime = startTime + audioBuffer.duration;
+
+            // Wait for this chunk to finish
+            await new Promise(resolve => {
+                source.onended = resolve;
+            });
+
+            ttsCurrentSource = null;
+        }
+    } catch (error) {
+        console.error('[TTS] Playback error:', error);
+    } finally {
+        ttsIsPlaying = false;
+        ttsNextStartTime = 0;
+
+        // Process next message in queue if any
+        if (ttsPendingMessages.length > 0) {
+            const nextMessage = ttsPendingMessages.shift();
+            sendTTSText(nextMessage);
+        }
+    }
+}
+
+/**
+ * Send text to TTS WebSocket
+ */
+async function sendTTSText(text) {
+    if (!text || text.trim().length === 0) {
+        return;
+    }
+
+    // Truncate if too long (2000 char limit per Deepgram)
+    const truncatedText = text.slice(0, 2000);
+
+    // Connect if needed
+    const connected = await initTTSConnection();
+    if (!connected) {
+        console.error('[TTS] Failed to connect, falling back to Web Speech API');
+        fallbackToWebSpeech(text);
+        return;
+    }
+
+    try {
+        // Send Speak command
+        ttsSocket.send(JSON.stringify({
+            type: 'Speak',
+            text: truncatedText
+        }));
+
+        // Send Flush to trigger audio generation
+        ttsSocket.send(JSON.stringify({
+            type: 'Flush'
+        }));
+
+        console.log('[TTS] Sent text:', truncatedText.substring(0, 50) + (truncatedText.length > 50 ? '...' : ''));
+    } catch (error) {
+        console.error('[TTS] Send error:', error);
+        fallbackToWebSpeech(text);
+    }
+}
+
+/**
+ * Fallback to Web Speech API if TTS fails
+ */
+function fallbackToWebSpeech(text) {
+    console.log('[TTS] Using Web Speech API fallback');
+
     if (isMuted) return;
 
-    // Cancel any ongoing speech
     speechSynthesis.cancel();
 
     const utterance = new SpeechSynthesisUtterance(text);
@@ -328,7 +538,6 @@ function speak(text) {
     utterance.pitch = 1.0;
     utterance.volume = 1.0;
 
-    // Try to use a nice voice
     const voices = speechSynthesis.getVoices();
     const preferredVoice = voices.find(v =>
         v.name.includes('Samantha') ||
@@ -343,6 +552,76 @@ function speak(text) {
 }
 
 /**
+ * Stop current TTS playback
+ */
+function stopTTSPlayback() {
+    // Clear audio queue
+    ttsAudioQueue = [];
+
+    // Stop current audio source
+    if (ttsCurrentSource) {
+        try {
+            ttsCurrentSource.stop();
+        } catch (e) {
+            // Already stopped
+        }
+        ttsCurrentSource = null;
+    }
+
+    ttsIsPlaying = false;
+    ttsNextStartTime = 0;
+
+    // Clear pending messages
+    ttsPendingMessages = [];
+
+    // Also cancel Web Speech API fallback
+    speechSynthesis.cancel();
+}
+
+/**
+ * Close TTS WebSocket connection
+ */
+function closeTTSConnection() {
+    if (ttsSocket) {
+        try {
+            ttsSocket.send(JSON.stringify({ type: 'Close' }));
+            ttsSocket.close();
+        } catch (e) {
+            console.error('[TTS] Error closing connection:', e);
+        }
+        ttsSocket = null;
+    }
+
+    stopTTSPlayback();
+}
+
+/**
+ * Text-to-speech (now using Deepgram WebSocket TTS)
+ */
+function speak(text) {
+    if (isMuted) return;
+
+    // Stop any ongoing speech
+    stopTTSPlayback();
+
+    if (!deepgramApiKey) {
+        console.warn('[TTS] No API key, using Web Speech fallback');
+        fallbackToWebSpeech(text);
+        return;
+    }
+
+    // If currently playing, queue the message
+    if (ttsIsPlaying) {
+        console.log('[TTS] Queueing message');
+        ttsPendingMessages.push(text);
+        return;
+    }
+
+    // Send to Deepgram TTS
+    sendTTSText(text);
+}
+
+/**
  * Toggle mute
  */
 function toggleMute() {
@@ -351,7 +630,8 @@ function toggleMute() {
     updateMuteButton();
 
     if (isMuted) {
-        speechSynthesis.cancel();
+        stopTTSPlayback(); // Stop Deepgram TTS
+        speechSynthesis.cancel(); // Keep for fallback
         announceToScreenReader('Voice output muted');
     } else {
         announceToScreenReader('Voice output enabled');
@@ -388,3 +668,10 @@ function announceToScreenReader(message) {
 speechSynthesis.onvoiceschanged = () => {
     speechSynthesis.getVoices();
 };
+
+// Cleanup TTS on page unload
+window.addEventListener('beforeunload', () => {
+    if (ttsSocket) {
+        closeTTSConnection();
+    }
+});
