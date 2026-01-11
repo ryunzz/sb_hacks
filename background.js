@@ -13,15 +13,18 @@ let config = {
     deepgramApiKey: ''
 };
 
-// Rate limiting (for free tier: 15 RPM)
-let requestTimestamps = [];
-const RATE_LIMIT_WINDOW = 60000; // 1 minute in ms
-const RATE_LIMIT_MAX = 14; // Keep under 15 to be safe
-
 // Initialize on installation
 chrome.runtime.onInstalled.addListener(async () => {
-    console.log('[onInstalled] Vision Agent installed');
-    await loadConfig();
+    console.log('Vision Agent installed');
+
+    // Load saved API keys
+    const stored = await chrome.storage.local.get(['geminiApiKey', 'deepgramApiKey']);
+    config.geminiApiKey = stored.geminiApiKey || '';
+    config.deepgramApiKey = stored.deepgramApiKey || '';
+
+    if (config.geminiApiKey) {
+        initGemini();
+    }
 
     // Open side panel when extension icon is clicked
     chrome.sidePanel
@@ -29,81 +32,19 @@ chrome.runtime.onInstalled.addListener(async () => {
         .catch((error) => console.error(error));
 });
 
-// Also load config on service worker startup (not just install)
-chrome.runtime.onStartup.addListener(async () => {
-    console.log('[onStartup] Vision Agent service worker starting...');
-    await loadConfig();
-});
-
-// Load configuration from storage
-async function loadConfig() {
-    console.log('[loadConfig] Loading API keys from storage...');
-    const stored = await chrome.storage.local.get(['geminiApiKey', 'deepgramApiKey']);
-
-    config.geminiApiKey = stored.geminiApiKey || '';
-    config.deepgramApiKey = stored.deepgramApiKey || '';
-
-    console.log('[loadConfig] Gemini API key present:', !!config.geminiApiKey);
-    console.log('[loadConfig] Deepgram API key present:', !!config.deepgramApiKey);
-
-    if (config.geminiApiKey) {
-        initGemini();
-    } else {
-        console.warn('[loadConfig] No Gemini API key found. Please configure in settings.');
-    }
-}
-
-// Check rate limit before making API requests
-function checkRateLimit() {
-    const now = Date.now();
-
-    // Remove timestamps older than 1 minute
-    requestTimestamps = requestTimestamps.filter(ts => now - ts < RATE_LIMIT_WINDOW);
-
-    const requestCount = requestTimestamps.length;
-    console.log(`[RateLimit] Requests in last minute: ${requestCount}/${RATE_LIMIT_MAX}`);
-
-    if (requestCount >= RATE_LIMIT_MAX) {
-        const oldestTimestamp = requestTimestamps[0];
-        const timeUntilReset = Math.ceil((RATE_LIMIT_WINDOW - (now - oldestTimestamp)) / 1000);
-
-        console.warn(`[RateLimit] Rate limit reached! Wait ${timeUntilReset}s`);
-        return {
-            allowed: false,
-            waitSeconds: timeUntilReset
-        };
-    }
-
-    // Add current request timestamp
-    requestTimestamps.push(now);
-    return { allowed: true };
-}
-
-// Get remaining requests
-function getRemainingRequests() {
-    const now = Date.now();
-    requestTimestamps = requestTimestamps.filter(ts => now - ts < RATE_LIMIT_WINDOW);
-    return Math.max(0, RATE_LIMIT_MAX - requestTimestamps.length);
-}
-
 // Initialize Gemini client
 function initGemini() {
-    if (!config.geminiApiKey) {
-        console.warn('[initGemini] No API key provided');
-        return;
-    }
+    if (!config.geminiApiKey) return;
 
     try {
-        console.log('[initGemini] Initializing with API key:', config.geminiApiKey.substring(0, 8) + '...');
         const genAI = new GoogleGenerativeAI(config.geminiApiKey);
         geminiClient = {
             model: genAI.getGenerativeModel({ model: 'gemini-2.0-flash-exp' }),
             visionModel: genAI.getGenerativeModel({ model: 'gemini-2.0-flash-exp' })
         };
-        console.log('[initGemini] ✓ Gemini initialized successfully');
+        console.log('Gemini initialized');
     } catch (error) {
-        console.error('[initGemini] ✗ Failed to initialize Gemini:', error);
-        console.error('[initGemini] Error details:', error.message);
+        console.error('Failed to initialize Gemini:', error);
     }
 }
 
@@ -139,13 +80,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
  * Update configuration (API keys)
  */
 async function updateConfig(newConfig) {
-    console.log('[updateConfig] Updating configuration...');
     config = { ...config, ...newConfig };
     await chrome.storage.local.set(config);
-    console.log('[updateConfig] Configuration saved to storage');
 
-    // Reinitialize Gemini with new keys
-    await loadConfig();
+    if (config.geminiApiKey) {
+        initGemini();
+    }
 }
 
 /**
@@ -200,16 +140,7 @@ async function handleUserMessage(userInput) {
  * Chat with Gemini
  */
 async function chat(message) {
-    // Check rate limit
-    const rateLimitCheck = checkRateLimit();
-    if (!rateLimitCheck.allowed) {
-        return {
-            type: 'error',
-            message: `Please slow down. You've made too many requests. Wait ${rateLimitCheck.waitSeconds} seconds before trying again. (Free tier limit: 15 requests/minute)`
-        };
-    }
-
-    const systemPrompt = `You are a friendly, helpful AI assistant designed specifically to help blind and low-vision users navigate the internet and their computer.
+    const systemPrompt = `You are a friendly, helpful AI assistant designed specifically to help blind and low-vision users navigate the internet and their computer. 
 
 Your personality:
 - Warm, patient, and encouraging
@@ -236,9 +167,6 @@ Keep responses brief but friendly - remember the user is listening, not reading.
             content: response
         });
 
-        const remaining = getRemainingRequests();
-        console.log(`[RateLimit] Requests remaining: ${remaining}`);
-
         return {
             type: 'response',
             message: response
@@ -254,59 +182,19 @@ Keep responses brief but friendly - remember the user is listening, not reading.
  */
 async function describeActiveTab(question = null) {
     try {
-        // Check rate limit first
-        const rateLimitCheck = checkRateLimit();
-        if (!rateLimitCheck.allowed) {
-            return {
-                type: 'error',
-                message: `Please slow down. You've made too many requests. Wait ${rateLimitCheck.waitSeconds} seconds before trying again. (Free tier limit: 15 requests/minute)`
-            };
-        }
-
         // Get active tab
-        console.log('[describeActiveTab] Getting active tab...');
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
-        if (!tab) {
-            console.error('[describeActiveTab] No active tab found');
-            return {
-                type: 'error',
-                message: "I couldn't find an active tab. Please make sure you have a tab open."
-            };
-        }
-
-        console.log('[describeActiveTab] Active tab:', tab.url);
-
-        // Check if tab URL is capturable
-        if (tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://')) {
-            console.error('[describeActiveTab] Cannot capture protected page:', tab.url);
-            return {
-                type: 'error',
-                message: "I can't capture screenshots of Chrome's internal pages. Please navigate to a regular website (like google.com) and try again."
-            };
-        }
-
         // Capture screenshot
-        console.log('[describeActiveTab] Capturing screenshot...');
         const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
             format: 'png'
         });
-        console.log('[describeActiveTab] Screenshot captured, size:', dataUrl.length);
 
         // Convert data URL to base64
         const base64 = dataUrl.split(',')[1];
 
-        // Check Gemini client
-        if (!geminiClient || !geminiClient.visionModel) {
-            console.error('[describeActiveTab] Gemini client not initialized');
-            return {
-                type: 'error',
-                message: "AI service not initialized. Please check your Gemini API key in settings."
-            };
-        }
-
         // Analyze with Gemini
-        const prompt = question || `You are an accessibility assistant for blind and low-vision users.
+        const prompt = question || `You are an accessibility assistant for blind and low-vision users. 
 Describe this screen in a clear, concise way that helps the user understand:
 1. What website or application is shown
 2. The main content and purpose of the current view
@@ -322,37 +210,18 @@ Be conversational but efficient. Prioritize actionable information.`;
             }
         };
 
-        console.log('[describeActiveTab] Sending to Gemini Vision API...');
         const result = await geminiClient.visionModel.generateContent([prompt, imagePart]);
         const description = result.response.text();
-        console.log('[describeActiveTab] Got response from Gemini');
 
         return {
             type: 'response',
             message: description
         };
     } catch (error) {
-        console.error('[describeActiveTab] ERROR:', error);
-        console.error('[describeActiveTab] Error name:', error.name);
-        console.error('[describeActiveTab] Error message:', error.message);
-        console.error('[describeActiveTab] Error stack:', error.stack);
-
-        // Provide specific error messages based on error type
-        let userMessage = "I couldn't see your screen. ";
-
-        if (error.message && error.message.includes('API key')) {
-            userMessage += "There's an issue with your Gemini API key. Please check it in settings.";
-        } else if (error.message && error.message.includes('quota')) {
-            userMessage += "You've hit the API rate limit. Please wait a minute and try again.";
-        } else if (error.message && error.message.includes('network')) {
-            userMessage += "Network error. Please check your internet connection.";
-        } else {
-            userMessage += `Error: ${error.message || 'Unknown error'}. Check the console for details.`;
-        }
-
+        console.error('Describe error:', error);
         return {
             type: 'error',
-            message: userMessage
+            message: "I couldn't see your screen. Please try again."
         };
     }
 }
@@ -385,15 +254,6 @@ async function captureActiveTab() {
  */
 async function handleActionRequest(instruction) {
     try {
-        // Check rate limit first
-        const rateLimitCheck = checkRateLimit();
-        if (!rateLimitCheck.allowed) {
-            return {
-                type: 'error',
-                message: `Please slow down. You've made too many requests. Wait ${rateLimitCheck.waitSeconds} seconds before trying again. (Free tier limit: 15 requests/minute)`
-            };
-        }
-
         // Get current tab screenshot for context
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
