@@ -15,6 +15,7 @@ const clearChatBtn = document.getElementById('clearChatBtn');
 const micPermissionModal = document.getElementById('micPermissionModal');
 const openMicSettingsBtn = document.getElementById('openMicSettings');
 const closeModalBtn = document.getElementById('closeModal');
+const recordingStatus = document.getElementById('recording-status');
 
 // State
 let isListening = false;
@@ -32,6 +33,7 @@ let currentUserMessageId = null; // Track the current user message being spoken
 let currentLoadingMessageId = null; // Track the loading message for responses
 let isAgentActive = false; // Track if Computer Use agent is actively working
 
+<<<<<<< HEAD
 // TTS statistics for debugging
 let ttsStats = {
     websocketSuccess: 0,
@@ -50,6 +52,12 @@ function logTTSStats() {
         });
     }
 }
+=======
+// Accessibility - Space bar hold-to-record state
+let spaceBarPressed = false;           // Track space bar hold state
+let recordingStartedBySpace = false;   // Track if auto-send should happen
+let audioContext = null;               // Web Audio API context for earcons
+>>>>>>> feat/accessibility
 
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
@@ -58,7 +66,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     setupOffscreenListeners();
 
     // Announce ready state for screen readers
-    announceToScreenReader('Vision Agent is ready. Click the microphone button to start recording, or type your message.');
+    announceToScreenReader('Vision Agent is ready. Hold Space to record, release to send, press Escape to cancel. You can also click the microphone button or type your message below.');
 });
 
 /**
@@ -110,18 +118,33 @@ function setupOffscreenListeners() {
                 if (message.transcript && message.transcript.trim()) {
                     const finalText = message.transcript.trim();
 
-                    // Put transcript in text input for user to review and send manually
+                    // Put transcript in text input
                     textInput.value = finalText;
 
-                    // Focus the text input so user can edit or send
-                    textInput.focus();
+                    // Auto-send if recording was started by space bar
+                    if (recordingStartedBySpace) {
+                        recordingStartedBySpace = false;
 
-                    setStatus('Review and click Send');
-                    announceToScreenReader('Transcript ready. Review and click send or press enter.');
+                        // Small delay to ensure transcript is visible
+                        setTimeout(() => {
+                            if (textInput.value.trim()) {
+                                sendTextMessage();
+                                announceToScreenReader('Message sent');
+                            }
+                        }, 100);
+                    } else {
+                        // Existing manual review flow
+                        // Focus the text input so user can edit or send
+                        textInput.focus();
+
+                        setStatus('Review and click Send');
+                        announceToScreenReader('Transcript ready. Review and click send or press enter.');
+                    }
                 } else {
                     // No transcript, clear input
                     textInput.value = '';
-                setStatus('Ready to help');
+                    recordingStartedBySpace = false;
+                    setStatus('Ready to help');
                 }
                 break;
 
@@ -327,6 +350,51 @@ function setupEventListeners() {
             selectedVoice = changes.voiceModel.newValue || 'aura-2-thalia-en';
         }
     });
+
+    // Global keydown listener for space bar hold-to-record
+    document.addEventListener('keydown', (e) => {
+        // Only activate if:
+        // 1. Space bar is pressed
+        // 2. Text input is NOT focused (prevent typing conflict)
+        // 3. Not already pressed (prevent key repeat triggering multiple starts)
+        if (e.code === 'Space' &&
+            document.activeElement !== textInput &&
+            !spaceBarPressed) {
+
+            e.preventDefault(); // Prevent page scroll
+            spaceBarPressed = true;
+
+            // Start recording
+            if (!isListening) {
+                recordingStartedBySpace = true;
+                startListening();
+
+                // Enhanced screen reader announcement
+                announceToScreenReader('Recording started. Speak now. Release space to send, or press escape to cancel.');
+            }
+        }
+
+        // Escape key to cancel recording
+        if (e.code === 'Escape' && isListening) {
+            e.preventDefault();
+            cancelRecording();
+        }
+    });
+
+    // Global keyup listener for auto-send on space release
+    document.addEventListener('keyup', (e) => {
+        if (e.code === 'Space' && spaceBarPressed) {
+            spaceBarPressed = false;
+
+            // Only stop if this recording was started by space bar
+            if (isListening && recordingStartedBySpace) {
+                // Stop recording - this will trigger auto-send
+                stopListening();
+
+                announceToScreenReader('Recording stopped. Processing and sending message.');
+            }
+        }
+    });
 }
 
 /**
@@ -459,6 +527,19 @@ async function startListening() {
 
         stopListening();
     }
+
+    // Play start earcon
+    playEarcon('start');
+
+    // Update ARIA live region for recording state
+    if (recordingStatus) {
+        recordingStatus.textContent = 'Recording in progress. Speak now.';
+    }
+
+    // Enhanced screen reader announcement (only if not already announced by space handler)
+    if (!recordingStartedBySpace) {
+        announceToScreenReader('Recording started. Speak now.');
+    }
 }
 
 /**
@@ -477,6 +558,55 @@ function stopListening() {
 
     // Tell background/offscreen to stop recording
     chrome.runtime.sendMessage({ type: 'stop-recording' });
+
+    // Play stop earcon
+    playEarcon('stop');
+
+    // Update ARIA live region for recording state
+    if (recordingStatus) {
+        recordingStatus.textContent = 'Recording stopped. Processing your message.';
+    }
+}
+
+/**
+ * Cancel recording without sending
+ */
+function cancelRecording() {
+    if (!isListening) {
+        return; // Not recording, ignore
+    }
+
+    // Send cancel message to background script
+    chrome.runtime.sendMessage({
+        action: 'cancel-recording'
+    });
+
+    // Update UI state
+    isListening = false;
+    recordingStartedBySpace = false;
+    voiceBtn.classList.remove('listening');
+    voiceBtn.querySelector('.voice-text').textContent = 'Start Recording';
+    voiceBtn.setAttribute('aria-label', 'Start recording');
+    voiceBtn.setAttribute('title', 'Click to start recording');
+
+    // Clear text input (discard any partial transcript)
+    textInput.value = '';
+    textInput.style.borderColor = '';
+    textInput.style.borderWidth = '';
+
+    // Update status
+    setStatus('Recording cancelled');
+
+    // Audio feedback
+    playEarcon('cancel');
+
+    // Update ARIA live region for recording state
+    if (recordingStatus) {
+        recordingStatus.textContent = 'Recording cancelled.';
+    }
+
+    // Screen reader announcement
+    announceToScreenReader('Recording cancelled');
 }
 
 /**
@@ -1618,6 +1748,56 @@ function announceToScreenReader(message) {
 }
 
 /**
+ * Initialize Web Audio API context for earcons (audio feedback beeps)
+ */
+function initAudioContext() {
+    if (!audioContext) {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    return audioContext;
+}
+
+/**
+ * Play earcon (audio feedback beep) for different recording states
+ * @param {string} type - Type of beep: 'start', 'stop', or 'cancel'
+ */
+function playEarcon(type) {
+    try {
+        const ctx = initAudioContext();
+        const oscillator = ctx.createOscillator();
+        const gainNode = ctx.createGain();
+
+        oscillator.connect(gainNode);
+        gainNode.connect(ctx.destination);
+
+        // Configure beep based on type
+        switch(type) {
+            case 'start':
+                oscillator.frequency.value = 800; // Higher pitch for start
+                gainNode.gain.value = 0.3;
+                oscillator.start();
+                oscillator.stop(ctx.currentTime + 0.1); // Short beep
+                break;
+            case 'stop':
+                oscillator.frequency.value = 600; // Lower pitch for stop
+                gainNode.gain.value = 0.3;
+                oscillator.start();
+                oscillator.stop(ctx.currentTime + 0.15); // Slightly longer
+                break;
+            case 'cancel':
+                oscillator.frequency.value = 400; // Lower pitch for error/cancel
+                gainNode.gain.value = 0.3;
+                oscillator.start();
+                oscillator.stop(ctx.currentTime + 0.2); // Longer for emphasis
+                break;
+        }
+    } catch (error) {
+        console.error('Error playing earcon:', error);
+        // Fail silently - earcons are nice-to-have, not critical
+    }
+}
+
+/**
  * Show microphone permission modal
  */
 function showMicPermissionModal() {
@@ -1649,7 +1829,8 @@ function clearChat() {
         <div class="message assistant">
             <div class="message-content">
                 Hello! I'm Vision Agent, your AI assistant for navigating the web.
-                Click the microphone button to start recording, or type your message below.
+                <strong>Keyboard users:</strong> Hold Space to record, release to send. Press Escape to cancel.
+                You can also click the microphone button to start recording, or type your message below.
                 Try saying "describe this page" to get started!
             </div>
         </div>

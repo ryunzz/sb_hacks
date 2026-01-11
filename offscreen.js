@@ -36,6 +36,55 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // Handle async operations
     (async () => {
     switch (message.type) {
+            case 'offscreen-cancel-recording':
+                if (isRecording) {
+                    // Stop recording immediately
+                    isRecording = false;
+
+                    // Close Deepgram socket without sending final transcript
+                    if (window.deepgramSocket && (window.deepgramSocket.readyState === WebSocket.OPEN || window.deepgramSocket.readyState === WebSocket.CONNECTING)) {
+                        try {
+                            window.deepgramSocket.close();
+                        } catch (error) {
+                            console.error('Error closing Deepgram socket:', error);
+                        }
+                        window.deepgramSocket = null;
+                    }
+
+                    // Stop media recorder
+                    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                        try {
+                            mediaRecorder.stop();
+                        } catch (error) {
+                            console.error('Error stopping MediaRecorder:', error);
+                        }
+                        mediaRecorder = null;
+                    }
+
+                    // Stop audio stream
+                    if (audioStream) {
+                        try {
+                            audioStream.getTracks().forEach(track => track.stop());
+                        } catch (error) {
+                            console.error('Error stopping audio tracks:', error);
+                        }
+                        audioStream = null;
+                    }
+
+                    // Clear transcript data
+                    transcript = '';
+                    lastInterimTranscript = '';
+
+                    console.log('Offscreen: Recording cancelled successfully');
+
+                    // Notify sidepanel
+                    chrome.runtime.sendMessage({
+                        action: 'recording-cancelled'
+                    }).catch(() => {});
+                }
+                sendResponse({ success: true });
+                break;
+
             case 'offscreen-start-recording':
                 // Ensure we're ready before starting
                 if (!isReady) {
