@@ -1,0 +1,10 @@
+# Deepgram API Key
+# Get your key from: https://console.deepgram.com/
+# 
+# Instructions:
+# 1. Copy this file and rename to 'deepgram_api_key' (no extension)
+# 2. Replace the placeholder below with your actual Deepgram API key
+# 3. The key should be a single line, no quotes
+
+YOUR_DEEPGRAM_API_KEY_HERE
+

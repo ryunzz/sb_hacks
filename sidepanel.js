@@ -177,14 +177,32 @@ function setupOffscreenListeners() {
                 speak('Microphone permission granted. You can now use voice input.');
                 break;
 
+            case 'transcript_confirmed':
+                // Backend confirmed STT transcript - show user message and start agent
+                console.log('[Backend] Transcript confirmed:', message.text);
+                if (message.text && message.text.trim()) {
+                    // Reset listening state
+                    isListening = false;
+                    voiceBtn.classList.remove('listening');
+                    voiceBtn.querySelector('.voice-text').textContent = 'Start Recording';
+                    
+                    // Show user message
+                    addMessage('user', message.text);
+                    setStatus('Agent is working...');
+                    isAgentActive = true;
+                }
+                break;
+
             case 'agent-narration':
-                // Agent is narrating its actions
-                console.log('[Agent] Narration:', message.text, '(timing:', message.timing, ')');
-                // Speak the narration via TTS
-                speak(message.text);
-                // Optionally show in UI based on timing
-                if (message.timing === 'observation' || message.timing === 'completion') {
-                    addMessage('assistant', message.text);
+                // Agent is narrating its actions with optional TTS audio from backend
+                console.log('[Agent] Narration:', message.text, '(has audio:', !!message.audio, ')');
+                // Show message in UI
+                addMessage('assistant', message.text);
+                // Play backend TTS audio if available, otherwise use frontend TTS
+                if (message.audio) {
+                    playAudioFromBase64(message.audio, message.audio_format || 'audio/mp3');
+                } else {
+                    speak(message.text);
                 }
                 break;
 
@@ -196,13 +214,19 @@ function setupOffscreenListeners() {
                 break;
 
             case 'agent-complete':
-                // Agent completed the task
-                console.log('[Agent] Task complete:', message.success, '-', message.summary);
+                // Agent completed the task with optional TTS audio from backend
+                console.log('[Agent] Task complete:', message.success, '-', message.summary, '(has audio:', !!message.audio, ')');
+                isAgentActive = false;
                 const completionMsg = message.success
                     ? `✅ Task completed: ${message.summary}`
                     : `❌ Task failed: ${message.summary}`;
                 addMessage('assistant', completionMsg);
-                speak(message.summary);
+                // Play backend TTS audio if available, otherwise use frontend TTS
+                if (message.audio) {
+                    playAudioFromBase64(message.audio, message.audio_format || 'audio/mp3');
+                } else {
+                    speak(message.summary);
+                }
                 setStatus('Ready to help');
                 break;
 
@@ -1036,69 +1060,76 @@ function setStatus(text) {
 }
 
 /**
- * Text-to-speech using Deepgram Aura (Thalia voice)
+ * Play audio from base64 encoded data (from backend TTS)
+ * @param {string} audioBase64 - Base64 encoded audio data
+ * @param {string} format - Audio MIME type (default: audio/mp3)
  */
-/**
- * Split text into chunks that are under the character limit, trying to split on sentence boundaries
- */
-function chunkText(text, maxLength = 1900) {
-    // If text is already under limit, return as single chunk
-    if (text.length <= maxLength) {
-        return [text];
+function playAudioFromBase64(audioBase64, format = 'audio/mp3') {
+    if (isMuted || !audioBase64) {
+        console.log('[TTS] Skipping backend audio playback (muted or no data)');
+        return;
     }
-
-    const chunks = [];
-    let remaining = text;
-
-    while (remaining.length > 0) {
-        if (remaining.length <= maxLength) {
-            chunks.push(remaining);
-            break;
+    
+    console.log(`[TTS] Playing backend audio (${audioBase64.length} chars base64, format: ${format})`);
+    
+    try {
+        // Convert base64 to blob
+        const binaryString = atob(audioBase64);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
         }
-
-        // Try to find a good break point (sentence ending)
-        let chunk = remaining.substring(0, maxLength);
-        const lastPeriod = chunk.lastIndexOf('.');
-        const lastExclamation = chunk.lastIndexOf('!');
-        const lastQuestion = chunk.lastIndexOf('?');
-        const lastNewline = chunk.lastIndexOf('\n');
-
-        // Find the best break point (prefer sentence endings, then newlines)
-        let breakPoint = Math.max(lastPeriod, lastExclamation, lastQuestion, lastNewline);
-
-        // If we found a good break point (within last 200 chars), use it
-        if (breakPoint > maxLength - 200 && breakPoint > 0) {
-            chunk = remaining.substring(0, breakPoint + 1).trim();
-            remaining = remaining.substring(breakPoint + 1).trim();
-        } else {
-            // No good break point, just split at maxLength
-            chunk = remaining.substring(0, maxLength).trim();
-            remaining = remaining.substring(maxLength).trim();
-        }
-
-        if (chunk.length > 0) {
-            chunks.push(chunk);
-        }
+        const blob = new Blob([bytes], { type: format });
+        
+        // Create audio and play
+        const audioUrl = URL.createObjectURL(blob);
+        const audio = new Audio(audioUrl);
+        
+        // Add to queue
+        currentAudioQueue.push(audio);
+        isPlayingAudio = true;
+        
+        audio.onended = () => {
+            console.log('[TTS] Backend audio playback finished');
+            URL.revokeObjectURL(audioUrl);
+            currentAudioQueue = currentAudioQueue.filter(a => a !== audio);
+            isPlayingAudio = currentAudioQueue.length > 0;
+        };
+        
+        audio.onerror = (error) => {
+            console.error('[TTS] Backend audio playback error:', error);
+            URL.revokeObjectURL(audioUrl);
+            currentAudioQueue = currentAudioQueue.filter(a => a !== audio);
+            isPlayingAudio = currentAudioQueue.length > 0;
+        };
+        
+        audio.play().catch((error) => {
+            console.error('[TTS] Failed to play backend audio:', error);
+            URL.revokeObjectURL(audioUrl);
+            currentAudioQueue = currentAudioQueue.filter(a => a !== audio);
+            isPlayingAudio = currentAudioQueue.length > 0;
+        });
+        
+    } catch (error) {
+        console.error('[TTS] Failed to decode backend audio:', error);
     }
-
-    return chunks;
 }
 
 /**
- * Speak text using Deepgram TTS, chunking if necessary
+ * Speak text using Web Speech Synthesis (browser TTS)
+ * This is used as a fallback when backend doesn't provide TTS audio
+ * Primary TTS is done by the Python backend using Deepgram
  */
 async function speak(text, stopExisting = true) {
-    console.log('🔊 speak() called:', {
+    console.log('🔊 speak() called (frontend fallback):', {
         textLength: text ? text.length : 0,
         textPreview: text ? text.substring(0, 50) : 'null',
         stopExisting: stopExisting,
-        isMuted: isMuted,
-        hasApiKey: !!deepgramApiKey,
-        selectedVoice: selectedVoice
+        isMuted: isMuted
     });
     
-    if (!text || typeof text !== 'string') {
-        console.log('❌ Invalid text, skipping speech');
+    if (!text || typeof text !== 'string' || !text.trim()) {
+        console.log('❌ Invalid or empty text, skipping speech');
         return Promise.resolve();
     }
     
@@ -1106,452 +1137,19 @@ async function speak(text, stopExisting = true) {
         console.log('🔇 Muted, skipping speech');
         return Promise.resolve();
     }
-    
-    if (!text.trim()) {
-        console.log('❌ Empty text, skipping speech');
-        return Promise.resolve();
-    }
 
     // Stop any ongoing speech if requested
     if (stopExisting) {
-        console.log('🛑 Stopping existing audio (stopExisting=true)');
         stopAllAudio();
+        window.speechSynthesis?.cancel();
         currentAudioQueue = [];
         isPlayingAudio = false;
-    } else {
-        console.log('▶️ Not stopping existing audio (stopExisting=false)');
     }
 
-    // Try to load API key and voice model if not available
-    if (!deepgramApiKey || deepgramApiKey.trim() === '' || !selectedVoice) {
-        try {
-            const config = await chrome.storage.local.get(['deepgramApiKey', 'voiceModel']);
-            deepgramApiKey = config.deepgramApiKey || '';
-            selectedVoice = config.voiceModel || 'aura-2-thalia-en';
-            console.log('TTS: Loaded voice model from config:', selectedVoice);
-        } catch (error) {
-            console.warn('Failed to load Deepgram config for TTS:', error);
-        }
-    }
-
-    if (!deepgramApiKey || deepgramApiKey.trim() === '') {
-        console.warn('No Deepgram API key for TTS - skipping speech output');
-        return Promise.resolve();
-    }
-    
-    // Ensure we have a valid voice model - always use Thalia (aura-2-thalia-en)
-    if (!selectedVoice || selectedVoice === 'aura-thalia-en' || !selectedVoice.includes('thalia')) {
-        selectedVoice = 'aura-2-thalia-en';
-        console.log('TTS: Using Thalia voice model:', selectedVoice);
-    }
-
-    const ttsStartTime = Date.now(); // Track total TTS time
-    
-    try {
-        // Use WebSocket TTS for streaming audio with lower latency
-        console.log(`🚀 Using WebSocket TTS for streaming audio (model: ${selectedVoice})`);
-        return await speakWithWebSocket(text, selectedVoice);
-        // Process in batches of 2 to maximize throughput while avoiding 429 errors
-        const MAX_CONCURRENT = 2;
-        const fetchPromises = chunks.map((chunk, index) => {
-            const apiUrl = 'https://api.deepgram.com/v1/speak?model=' + selectedVoice;
-            const chunkRequestStartTime = Date.now();
-            const batchNumber = Math.floor(index / MAX_CONCURRENT);
-            const delay = batchNumber * 100; // 100ms between batches to avoid rate limits
-            
-            console.log(`📡 TTS API Request ${index + 1}/${chunks.length} (batch ${batchNumber + 1}):`, {
-                url: apiUrl,
-                chunkLength: chunk.length,
-                chunkPreview: chunk.substring(0, 50),
-                timestamp: new Date().toISOString()
-            });
-            
-            return new Promise((resolve) => {
-                setTimeout(() => {
-                    fetch(apiUrl, {
-                        method: 'POST',
-                        headers: {
-                            'Authorization': `Token ${deepgramApiKey}`,
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({
-                            text: chunk
-                        })
-                    }).then(resolve).catch(resolve);
-                }, delay);
-            })
-            .then(async (response) => {
-                const chunkRequestTime = Date.now() - chunkRequestStartTime;
-                console.log(`📥 TTS API Response ${index + 1} (took ${chunkRequestTime}ms):`, {
-                    status: response.status,
-                    statusText: response.statusText,
-                    ok: response.ok,
-                    headers: Object.fromEntries(response.headers.entries())
-                });
-                
-                if (!response.ok) {
-                    const errorText = await response.text();
-                    console.error(`❌ TTS API error for chunk ${index + 1} (took ${chunkRequestTime}ms):`, {
-                        status: response.status,
-                        statusText: response.statusText,
-                        errorText: errorText
-                    });
-                    
-                    // For 400 errors (bad model name), fail silently
-                    if (response.status === 400) {
-                        console.warn(`⚠️ TTS model not available for chunk ${index + 1}, skipping`);
-                        return null;
-                    }
-                    
-                    // For 413 errors, we shouldn't hit this since we chunk at 1900, but handle it
-                    if (response.status === 413) {
-                        console.warn(`⚠️ TTS chunk ${index + 1} too large, skipping`);
-                        return null;
-                    }
-                    
-                    return null; // Skip this chunk on error
-                }
-                
-                return response.blob().then(blob => {
-                    if (!blob || blob.size === 0) {
-                        console.error(`❌ TTS: Invalid audio blob for chunk ${index + 1}`);
-                        return null;
-                    }
-                    console.log(`✅ TTS: Received audio blob for chunk ${index + 1} (API took ${chunkRequestTime}ms), size: ${blob.size} bytes`);
-                    return { index, blob };
-                });
-            })
-            .catch(error => {
-                console.error(`TTS: Fetch error for chunk ${index + 1}:`, error);
-                return null;
-            });
-        });
-        
-        // Wait for all fetches to complete
-        const audioBlobs = await Promise.all(fetchPromises);
-        const fetchTime = Date.now() - fetchStartTime;
-        console.log(`⏱️ TTS: All chunks fetched in ${fetchTime}ms (average: ${chunks.length > 0 ? (fetchTime / chunks.length).toFixed(0) : 0}ms per chunk)`);
-        
-        const playbackStartTime = Date.now();
-        
-        // Filter out null results and sort by index to maintain order
-        const validBlobs = audioBlobs
-            .filter(item => item !== null)
-            .sort((a, b) => a.index - b.index);
-        
-        if (validBlobs.length === 0) {
-            console.error('❌ TTS: No valid audio blobs received - cannot play audio!');
-            console.error('This means the Deepgram API call failed or returned no audio data.');
-            console.log('➡️ Falling back to Web Speech Synthesis (browser TTS)');
-            return speakWithWebSpeech(text);
-        }
-        
-        console.log(`▶️ TTS: Playing ${validBlobs.length} audio chunk(s) sequentially`);
-        
-        // Play chunks sequentially (but they're already fetched, so no API wait time)
-        for (let i = 0; i < validBlobs.length; i++) {
-            const { index, blob } = validBlobs[i];
-            const audioUrl = URL.createObjectURL(blob);
-            console.log(`🔗 TTS: Created blob URL for chunk ${index + 1}:`, audioUrl.substring(0, 50) + '...');
-
-            // Create and play audio
-            const audio = new Audio(audioUrl);
-            audio.volume = 1.0;
-            currentAudioQueue.push(audio);
-            console.log(`🎵 TTS: Created audio element for chunk ${index + 1}:`, {
-                readyState: audio.readyState,
-                queueLength: currentAudioQueue.length
-            });
-
-            // Wait for this chunk to finish before playing the next one
-            await new Promise((resolve, reject) => {
-                let resolved = false;
-                
-                const cleanup = () => {
-                    if (!resolved) {
-                        resolved = true;
-                        URL.revokeObjectURL(audioUrl);
-                        currentAudioQueue = currentAudioQueue.filter(a => a !== audio);
-                        isPlayingAudio = currentAudioQueue.length > 0;
-                    }
-                };
-                
-                audio.onended = () => {
-                    console.log(`✅ TTS: Chunk ${index + 1} finished playing`);
-                    cleanup();
-                    resolve();
-                };
-
-                audio.onerror = (error) => {
-                    console.error(`❌ TTS: Audio playback error for chunk ${index + 1}:`, {
-                        error: error,
-                        errorCode: audio.error?.code,
-                        errorMessage: audio.error?.message,
-                        audioSrc: audio.src?.substring(0, 50)
-                    });
-                    cleanup();
-                    // Don't reject - just resolve so we can continue
-                    resolve();
-                };
-
-                // Set up play promise
-                isPlayingAudio = true;
-                console.log(`▶️ TTS: Attempting to play chunk ${index + 1}...`);
-                
-                const playPromise = audio.play();
-                console.log(`🎬 TTS: play() called for chunk ${index + 1}, promise:`, playPromise);
-                
-                if (playPromise !== undefined) {
-                    playPromise
-                        .then(() => {
-                            console.log(`TTS: Audio ${index + 1} play() started successfully, currentTime: ${audio.currentTime}, duration: ${audio.duration}`);
-                            // Verify audio is actually playing
-                            setTimeout(() => {
-                                if (audio.paused) {
-                                    console.error(`TTS: Audio ${index + 1} is paused after play() - attempting to play again`);
-                                    audio.play().catch(err => {
-                                        console.error(`TTS: Retry play() failed for chunk ${index + 1}:`, err);
-                                    });
-                                } else {
-                                    console.log(`TTS: Audio ${index + 1} confirmed playing, currentTime: ${audio.currentTime}`);
-                                }
-                            }, 100);
-                        })
-                        .catch((playError) => {
-                            console.error(`TTS: audio.play() failed for chunk ${index + 1}:`, playError);
-                            // Try to get more info about the error
-                            if (playError.name === 'NotAllowedError') {
-                                console.error(`TTS: Autoplay blocked for chunk ${index + 1} - user interaction required`);
-                            }
-                            // Don't reject - just log and resolve so we can continue
-                            cleanup();
-                            resolve();
-                        });
-                } else {
-                    console.warn(`⚠️ TTS: audio.play() returned undefined for chunk ${index + 1} - checking if playing...`);
-                    // If play() doesn't return a promise, audio might have started immediately
-                    // Wait a bit to see if it plays, then resolve
-                    setTimeout(() => {
-                        if (audio.paused) {
-                            console.error(`❌ TTS: Audio ${index + 1} is still paused after play() call - attempting to play`);
-                            audio.play().catch(err => {
-                                console.error(`❌ TTS: Retry play() failed:`, err);
-                                // Resolve anyway so we don't hang
-                                if (!resolved) {
-                                    cleanup();
-                                    resolve();
-                                }
-                            });
-                        } else {
-                            console.log(`✅ TTS: Audio ${index + 1} is playing`);
-                        }
-                        // Resolve after checking (audio should be playing or we'll handle error above)
-                        // But wait for onended to fire naturally
-                    }, 100);
-                }
-            });
-        }
-        const playbackTime = Date.now() - playbackStartTime;
-        const totalTtsTime = Date.now() - ttsStartTime;
-        console.log(`✅ TTS: All chunks finished playing. Playback: ${playbackTime}ms, Total: ${totalTtsTime}ms`);
-        console.log(`✅ TTS: speak() function completing successfully`);
-        
-        // Explicitly return resolved promise to ensure speak() resolves
-        return Promise.resolve();
-
-    } catch (error) {
-        console.error('❌ TTS error:', error);
-        console.error('Error stack:', error.stack);
-        console.log('➡️ Falling back to Web Speech Synthesis (browser TTS)');
-        // Fallback to browser TTS if Deepgram fails
-        return speakWithWebSpeech(text);
-    }
-}
-
-/**
- * Speak text using Deepgram WebSocket TTS API for streaming audio
- * This provides lower latency and allows playback to start immediately
- */
-async function speakWithWebSocket(text, voiceModel) {
-    const wsStartTime = Date.now();
-    console.log(`🔌 WebSocket TTS: Starting connection for "${text.substring(0, 50)}..."`);
-    
-    return new Promise((resolve, reject) => {
-        // Ensure we're using Thalia voice model (aura-2-thalia-en)
-        // This is Deepgram's recommended voice for conversational TTS
-        const model = voiceModel && voiceModel.includes('thalia') ? voiceModel : 'aura-2-thalia-en';
-        if (model !== voiceModel) {
-            console.log(`🔌 WebSocket TTS: Using Thalia voice model: ${model} (was: ${voiceModel})`);
-        }
-        
-        // Split text into chunks if too long (WebSocket can handle longer, but chunk for reliability)
-        const chunks = chunkText(text.trim(), 1900);
-        console.log(`🔌 WebSocket TTS: Processing ${chunks.length} chunk(s)`);
-        
-        // WebSocket URL for TTS - using Thalia voice model
-        const wsUrl = `wss://api.deepgram.com/v1/speak?model=${model}`;
-        console.log(`🔌 WebSocket TTS: Connecting to ${wsUrl} (Thalia voice)`);
-        
-        // Create WebSocket connection with API key as subprotocol
-        const ws = new WebSocket(wsUrl, ['token', deepgramApiKey.trim()]);
-        
-        let audioChunks = [];
-        let audioContext = null;
-        let sourceNodes = [];
-        let isPlaying = false;
-        let chunksProcessed = 0;
-        let connectionStartTime = Date.now();
-        let firstAudioReceived = false;
-        let firstAudioTime = null;
-        let totalAudioDuration = 0;
-        let nextPlayTime = 0;
-        
-        // Connection timeout
-        const connectionTimeout = setTimeout(() => {
-            if (ws.readyState !== WebSocket.OPEN) {
-                console.error('❌ WebSocket TTS: Connection timeout');
-                ws.close();
-                reject(new Error('WebSocket connection timeout'));
-            }
-        }, 10000);
-        
-        ws.onopen = () => {
-            const connectionTime = Date.now() - connectionStartTime;
-            console.log(`✅ WebSocket TTS: Connected in ${connectionTime}ms`);
-            clearTimeout(connectionTimeout);
-            
-            // Initialize AudioContext for streaming playback
-            try {
-                audioContext = new (window.AudioContext || window.webkitAudioContext)();
-                console.log(`🎵 WebSocket TTS: AudioContext initialized`);
-            } catch (error) {
-                console.error('❌ WebSocket TTS: Failed to create AudioContext:', error);
-                ws.close();
-                reject(error);
-                return;
-            }
-            
-            // Send text chunks
-            chunks.forEach((chunk, index) => {
-                const message = {
-                    type: 'text',
-                    text: chunk
-                };
-                console.log(`📤 WebSocket TTS: Sending chunk ${index + 1}/${chunks.length} (${chunk.length} chars)`);
-                ws.send(JSON.stringify(message));
-            });
-            
-            // Send finalize message after all chunks
-            setTimeout(() => {
-                console.log(`📤 WebSocket TTS: Sending finalize message`);
-                ws.send(JSON.stringify({ type: 'finalize' }));
-            }, 100);
-        };
-        
-        ws.onmessage = async (event) => {
-            try {
-                // Check if message is binary (audio data) or text (metadata)
-                if (event.data instanceof Blob || event.data instanceof ArrayBuffer) {
-                    // Binary audio data - decode and play immediately
-                    if (!firstAudioReceived) {
-                        firstAudioReceived = true;
-                        firstAudioTime = Date.now() - wsStartTime;
-                        console.log(`🎵 WebSocket TTS: First audio chunk received in ${firstAudioTime}ms (streaming started!)`);
-                    }
-                    
-                    const arrayBuffer = event.data instanceof Blob ? await event.data.arrayBuffer() : event.data;
-                    audioChunks.push(arrayBuffer);
-                    
-                    // Decode and play audio immediately (streaming)
-                    try {
-                        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer.slice(0));
-                        totalAudioDuration += audioBuffer.duration;
-                        
-                        if (!isPlaying) {
-                            isPlaying = true;
-                            isPlayingAudio = true;
-                            nextPlayTime = audioContext.currentTime;
-                            console.log(`▶️ WebSocket TTS: Starting audio playback (streaming)`);
-                        }
-                        
-                        // Schedule playback at the right time (queue chunks sequentially)
-                        const source = audioContext.createBufferSource();
-                        source.buffer = audioBuffer;
-                        source.connect(audioContext.destination);
-                        sourceNodes.push(source);
-                        
-                        // Calculate when to start this chunk (queue after previous chunks)
-                        const startTime = nextPlayTime;
-                        source.start(startTime);
-                        nextPlayTime += audioBuffer.duration; // Queue next chunk after this one
-                        
-                        chunksProcessed++;
-                        console.log(`🎵 WebSocket TTS: Playing audio chunk ${chunksProcessed} (${audioBuffer.duration.toFixed(2)}s, total: ${totalAudioDuration.toFixed(2)}s)`);
-                        
-                        // Track when this chunk finishes
-                        source.onended = () => {
-                            sourceNodes = sourceNodes.filter(n => n !== source);
-                            if (sourceNodes.length === 0 && ws.readyState === WebSocket.CLOSED) {
-                                isPlayingAudio = false;
-                                console.log(`✅ WebSocket TTS: All audio playback completed`);
-                            }
-                        };
-                    } catch (decodeError) {
-                        console.error('❌ WebSocket TTS: Failed to decode audio:', decodeError);
-                    }
-                } else {
-                    // Text message (metadata)
-                    try {
-                        const data = JSON.parse(event.data);
-                        console.log(`📥 WebSocket TTS: Received metadata:`, data);
-                    } catch (parseError) {
-                        console.log(`📥 WebSocket TTS: Received text message:`, event.data);
-                    }
-                }
-            } catch (error) {
-                console.error('❌ WebSocket TTS: Error processing message:', error);
-            }
-        };
-        
-        ws.onerror = (error) => {
-            console.error('❌ WebSocket TTS: WebSocket error:', error);
-            clearTimeout(connectionTimeout);
-            reject(error);
-        };
-        
-        ws.onclose = (event) => {
-            const totalTime = Date.now() - wsStartTime;
-            console.log(`🔌 WebSocket TTS: Connection closed (code: ${event.code}, reason: ${event.reason})`);
-            console.log(`⏱️ WebSocket TTS: Total time: ${totalTime}ms`);
-            if (firstAudioTime) {
-                console.log(`⏱️ WebSocket TTS: Time to first audio: ${firstAudioTime}ms`);
-            }
-            
-            clearTimeout(connectionTimeout);
-            
-            // Wait for audio to finish playing
-            if (isPlaying && totalAudioDuration > 0) {
-                // Wait for all audio to finish (add small buffer)
-                const waitTime = (totalAudioDuration * 1000) + 500;
-                console.log(`⏳ WebSocket TTS: Waiting ${waitTime}ms for audio to finish...`);
-                setTimeout(() => {
-                    isPlayingAudio = false;
-                    console.log(`✅ WebSocket TTS: Audio playback completed`);
-                    resolve();
-                }, waitTime);
-            } else {
-                isPlayingAudio = false;
-                if (event.code === 1000 || event.code === 1001) {
-                    // Normal closure
-                    resolve();
-                } else {
-                    // Error closure - fallback to Web Speech
-                    console.log('➡️ WebSocket TTS failed, falling back to Web Speech');
-                    speakWithWebSpeech(text).then(resolve).catch(resolve);
-                }
-            }
-        };
-    });
+    // Use Web Speech Synthesis (browser TTS) as fallback
+    // Primary TTS is handled by the backend
+    console.log('▶️ Using Web Speech Synthesis (browser fallback)');
+    return speakWithWebSpeech(text);
 }
 
 /**
@@ -1589,57 +1187,6 @@ async function speakWithWebSpeech(text) {
             resolve();
         }
     });
-}
-
-/**
- * Helper function to speak a single chunk (used for recursive splitting)
- */
-async function speakChunk(chunk) {
-    if (!deepgramApiKey || !chunk.trim()) return;
-
-    try {
-        const response = await fetch('https://api.deepgram.com/v1/speak?model=' + selectedVoice, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Token ${deepgramApiKey}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                text: chunk
-            })
-        });
-
-        if (!response.ok) {
-            console.error('TTS API error for chunk:', response.status);
-            return;
-        }
-
-        const audioBlob = await response.blob();
-        const audioUrl = URL.createObjectURL(audioBlob);
-        const audio = new Audio(audioUrl);
-        currentAudioQueue.push(audio);
-
-        await new Promise((resolve, reject) => {
-        audio.onended = () => {
-            URL.revokeObjectURL(audioUrl);
-            currentAudioQueue = currentAudioQueue.filter(a => a !== audio);
-            isPlayingAudio = currentAudioQueue.length > 0;
-                resolve();
-        };
-
-        audio.onerror = (error) => {
-            URL.revokeObjectURL(audioUrl);
-            currentAudioQueue = currentAudioQueue.filter(a => a !== audio);
-            isPlayingAudio = currentAudioQueue.length > 0;
-                reject(error);
-        };
-
-        isPlayingAudio = true;
-            audio.play().catch(reject);
-        });
-    } catch (error) {
-        console.error('TTS chunk error:', error);
-    }
 }
 
 /**
