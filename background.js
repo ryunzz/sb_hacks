@@ -444,7 +444,7 @@ async function chat(message) {
         };
     }
 
-    const systemPrompt = `You're a helpful friend helping someone who is blind navigate the web. Talk to them like you're texting or chatting - natural, casual, and friendly. Make sure what you are saying is clear to someone who is blind
+    const systemPrompt = `You're a helpful friend helping someone who is blind navigate the web. Talk to them like you're chatting - natural, casual, and friendly. Make sure what you are saying is clear to someone who is blind
 
 Here's how you should talk:
 - Use contractions: "I'm", "you're", "that's", "it's", "don't", "can't"
@@ -474,7 +474,7 @@ In the end, send a friendly related follow up question or related statement (sho
         });
 
         const result = await chat.sendMessage(message);
-        const responseText = result.response.text();
+        let responseText = result.response.text();
 
         if (!responseText || typeof responseText !== 'string') {
             console.error('Chat returned invalid response:', responseText);
@@ -483,6 +483,25 @@ In the end, send a friendly related follow up question or related statement (sho
                 message: 'Sorry, I got an unexpected response from the AI. Could you try that again?'
             };
         }
+
+        // Clean up any markdown formatting or special symbols
+        // Remove all asterisks
+        responseText = responseText.replace(/\*\*/g, '');
+        responseText = responseText.replace(/\*/g, '');
+        // Remove markdown headers (# Header)
+        responseText = responseText.replace(/^#+\s+/gm, '');
+        // Remove bullet points, dashes, and list markers
+        responseText = responseText.replace(/^[\*\-\•]\s+/gm, '');
+        // Remove numbered lists
+        responseText = responseText.replace(/^\d+\.\s+/gm, '');
+        // Remove backticks used for code
+        responseText = responseText.replace(/`/g, '');
+        // Remove markdown links [text](url) - keep just the text
+        responseText = responseText.replace(/\[([^\]]+)\]\([^\)]+\)/g, '$1');
+        // Remove standalone labels with colons (like "Answer:" or "Result:")
+        responseText = responseText.replace(/^([A-Z][^:]+):\s*$/gm, '');
+        // Clean up extra spaces
+        responseText = responseText.replace(/\s{2,}/g, ' ');
 
         conversationHistory.push({
             role: 'assistant',
@@ -493,7 +512,7 @@ In the end, send a friendly related follow up question or related statement (sho
 
         const responseObj = {
             type: 'response',
-            message: responseText
+            message: responseText.trim()
         };
 
         console.log('Chat returning response object:', { type: responseObj.type, messageLength: responseObj.message?.length });
@@ -579,8 +598,8 @@ In the end, ask a related follow up question.
         const result = await geminiClient.visionModel.generateContent([prompt, imagePart]);
         let description = result.response.text();
 
-        // Clean up any markdown formatting that might have slipped through
-        // Remove all asterisks first
+        // Clean up any markdown formatting and special symbols
+        // Remove all asterisks
         description = description.replace(/\*\*/g, '');
         description = description.replace(/\*/g, '');
         // Remove markdown headers (# Header)
@@ -589,6 +608,10 @@ In the end, ask a related follow up question.
         description = description.replace(/^[\*\-\•]\s+/gm, '');
         // Remove numbered lists
         description = description.replace(/^\d+\.\s+/gm, '');
+        // Remove backticks used for code
+        description = description.replace(/`/g, '');
+        // Remove markdown links [text](url) - keep just the text
+        description = description.replace(/\[([^\]]+)\]\([^\)]+\)/g, '$1');
         // Remove standalone labels with colons (like "Website:" or "Main Elements:")
         description = description.replace(/^([A-Z][^:]+):\s*$/gm, '');
         // Remove patterns like "Website:" or "Main Elements:" at start of lines
@@ -688,8 +711,20 @@ Only output valid JSON, no markdown.`;
         }
 
         const plan = JSON.parse(jsonMatch[0]);
-
+        
+        // Clean up the explanation and needsMoreInfo text to remove special symbols
+        if (plan.explanation) {
+            plan.explanation = plan.explanation.replace(/\*\*/g, '');
+            plan.explanation = plan.explanation.replace(/\*/g, '');
+            plan.explanation = plan.explanation.replace(/`/g, '');
+            plan.explanation = plan.explanation.replace(/\[([^\]]+)\]\([^\)]+\)/g, '$1');
+        }
         if (plan.needsMoreInfo) {
+            plan.needsMoreInfo = plan.needsMoreInfo.replace(/\*\*/g, '');
+            plan.needsMoreInfo = plan.needsMoreInfo.replace(/\*/g, '');
+            plan.needsMoreInfo = plan.needsMoreInfo.replace(/`/g, '');
+            plan.needsMoreInfo = plan.needsMoreInfo.replace(/\[([^\]]+)\]\([^\)]+\)/g, '$1');
+            
             return {
                 type: 'response',
                 message: plan.needsMoreInfo

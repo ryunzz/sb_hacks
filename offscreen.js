@@ -701,9 +701,15 @@ async function startRecording(deepgramApiKey, language = 'en') {
  */
 function stopRecording() {
     console.log('Stop recording called, isRecording:', isRecording);
+    
+    // If already stopped/stopping, don't do anything
+    if (!isRecording) {
+        console.log('Already stopped or stopping, ignoring duplicate stop call');
+        return;
+    }
 
-    // Set flag first to prevent new recordings
-    isRecording = false;
+    // DON'T set isRecording = false yet - we need to receive final transcripts from Deepgram first
+    // The onclose handler will set it to false after processing the final transcript
 
     // Stop MediaRecorder first
     if (mediaRecorder) {
@@ -743,7 +749,8 @@ function stopRecording() {
             try {
                 console.log('Sending Finalize message to Deepgram');
                 window.deepgramSocket.send(JSON.stringify({ type: 'Finalize' }));
-                // Wait a moment for Deepgram to process final audio, then close
+                // Wait a moment for Deepgram to process final audio and send transcripts, then close
+                // Keep isRecording = true during this time so we can receive the final transcript
                 setTimeout(() => {
                     if (window.deepgramSocket) {
                         if (window.deepgramSocket.readyState === WebSocket.OPEN || window.deepgramSocket.readyState === WebSocket.CONNECTING) {
@@ -752,7 +759,13 @@ function stopRecording() {
                         }
                         window.deepgramSocket = null;
                     }
-                }, 500);
+                    // Set isRecording = false after socket closes (onclose will handle the final transcript)
+                    // Add extra delay to ensure onclose handler runs first
+                    setTimeout(() => {
+                        isRecording = false;
+                        console.log('isRecording set to false after final transcript processing');
+                    }, 100);
+                }, 800); // Increased from 500ms to 800ms to give more time for final transcripts
             } catch (error) {
                 console.error('Error sending Finalize message:', error);
                 // If Finalize fails, just close the socket
@@ -764,6 +777,7 @@ function stopRecording() {
                     console.error('Error closing socket:', closeError);
                 }
                 window.deepgramSocket = null;
+                isRecording = false;
             }
         } else {
             // Socket is not open, just clean it up
@@ -776,7 +790,11 @@ function stopRecording() {
                 // Ignore errors if already closed
             }
             window.deepgramSocket = null;
+            isRecording = false;
         }
+    } else {
+        // No socket, just set flag
+        isRecording = false;
     }
 
     currentDeepgramSocket = null;
