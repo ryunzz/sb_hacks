@@ -3,6 +3,8 @@
  * Handles voice input (Deepgram), text-to-speech, and communication with background script
  */
 
+import { speak, stopAllAudio } from './tts.js';
+
 // DOM Elements
 const messagesContainer = document.getElementById('messages');
 const voiceBtn = document.getElementById('voiceBtn');
@@ -19,10 +21,10 @@ const closeModalBtn = document.getElementById('closeModal');
 let isListening = false;
 let isMuted = false;
 let elevenlabsApiKey = '';
+let deepgramApiKey = '';
+let ttsProvider = 'elevenlabs';
 let selectedLanguage = 'en';
 let selectedVoice = '21m00Tcm4TlvDq8ikWAM'; // Rachel - ElevenLabs default
-let currentAudioQueue = [];
-let isPlayingAudio = false;
 let fillerTimeout = null;
 let currentUserMessageId = null; // Track the current user message being spoken
 let currentLoadingMessageId = null; // Track the loading message for responses
@@ -114,7 +116,7 @@ function setupOffscreenListeners() {
                 // Permission was granted in the requestPermissions page
                 console.log('Microphone permission granted');
                 addMessage('assistant', '✅ Microphone permission granted! You can now use voice input.');
-                speak('Microphone permission granted. You can now use voice input.');
+                speakText('Microphone permission granted. You can now use voice input.');
                 break;
         }
     });
@@ -127,11 +129,15 @@ async function loadConfig() {
     try {
         const config = await chrome.storage.local.get([
             'elevenlabsApiKey',
+            'deepgramApiKey',
+            'ttsProvider',
             'voiceMuted',
             'language',
             'voiceId'
         ]);
         elevenlabsApiKey = config.elevenlabsApiKey || '';
+        deepgramApiKey = config.deepgramApiKey || '';
+        ttsProvider = config.ttsProvider || 'elevenlabs';
         isMuted = config.voiceMuted || false;
         selectedLanguage = config.language || 'en';
         selectedVoice = config.voiceId || '21m00Tcm4TlvDq8ikWAM'; // Rachel default
@@ -206,17 +212,24 @@ function setupEventListeners() {
 
     // Listen for config updates
     chrome.storage.onChanged.addListener((changes) => {
+        if (changes.elevenlabsApiKey) {
+            elevenlabsApiKey = changes.elevenlabsApiKey.newValue || '';
+        }
         if (changes.deepgramApiKey) {
             deepgramApiKey = changes.deepgramApiKey.newValue || '';
+        }
+        if (changes.ttsProvider) {
+            ttsProvider = changes.ttsProvider.newValue || 'elevenlabs';
         }
         if (changes.language) {
             selectedLanguage = changes.language.newValue || 'en';
         }
-        if (changes.voiceModel) {
-            selectedVoice = changes.voiceModel.newValue || 'aura-asteria-en';
+        if (changes.voiceId) {
+            selectedVoice = changes.voiceId.newValue || '21m00Tcm4TlvDq8ikWAM';
         }
     });
 }
+
 
 /**
  * Check if microphone permission is granted
@@ -257,7 +270,7 @@ async function requestMicrophonePermission() {
     });
     
     addMessage('assistant', 'Opening microphone permission page. Please allow microphone access when prompted, then try again.');
-    speak('Opening microphone permission page. Please allow microphone access when prompted.');
+    speakText('Opening microphone permission page. Please allow microphone access when prompted.');
 }
 
 /**
@@ -272,7 +285,7 @@ async function startListening() {
     const hasPermission = await checkMicrophonePermission();
     if (!hasPermission) {
         addMessage('assistant', 'Microphone permission is required. Opening permission request page...');
-        speak('Microphone permission is required. Opening permission request page.');
+        speakText('Microphone permission is required. Opening permission request page.');
         await requestMicrophonePermission();
         return;
     }
@@ -416,7 +429,7 @@ async function handleUserInput(input, existingUserMessageId = null) {
 
     fillerTimeout = setTimeout(() => {
         const randomFiller = fillerPhrases[Math.floor(Math.random() * fillerPhrases.length)];
-        speak(randomFiller);
+        speakText(randomFiller);
     }, 400);
 
     try {
@@ -455,7 +468,7 @@ async function handleUserInput(input, existingUserMessageId = null) {
         if (!response) {
             console.error('No response received from background');
             addMessage('assistant', 'No response received. Please check your API keys and try again.');
-            speak('No response received. Please check your API keys and try again.');
+            speakText('No response received. Please check your API keys and try again.');
             setStatus('Ready to help');
             return;
         }
@@ -477,7 +490,7 @@ async function handleUserInput(input, existingUserMessageId = null) {
                 addMessage('assistant', errorText);
             }
             if (response.message) {
-                speak(response.message);
+                speakText(response.message);
             }
         } else if (response.type === 'response') {
             const messageText = response.message || response.text || '';
@@ -495,7 +508,7 @@ async function handleUserInput(input, existingUserMessageId = null) {
                 } else {
                     addMessage('assistant', messageText);
                 }
-                speak(messageText);
+                speakText(messageText);
             } else {
                 console.error('Response type is "response" but no message field:', response);
                 const errorText = 'Received response but no message content.';
@@ -530,7 +543,7 @@ async function handleUserInput(input, existingUserMessageId = null) {
                 } else {
                     addMessage('assistant', errorText);
                 }
-                speak(errorText);
+                speakText(errorText);
             } else if (response.forwarded) {
                 // This is a forwarded message, ignore it
                 console.log('Ignoring forwarded message');
@@ -554,7 +567,7 @@ async function handleUserInput(input, existingUserMessageId = null) {
                     } else {
                         addMessage('assistant', messageText);
                     }
-                    speak(messageText);
+                    speakText(messageText);
                 } else {
                     console.error('Could not extract message from response:', response);
                     const errorText = 'I received a response but couldn\'t understand the format. Please try again.';
@@ -569,7 +582,7 @@ async function handleUserInput(input, existingUserMessageId = null) {
                     } else {
                         addMessage('assistant', errorText);
                     }
-                    speak(errorText);
+                    speakText(errorText);
                 }
             }
         }
@@ -601,7 +614,7 @@ async function handleUserInput(input, existingUserMessageId = null) {
             removeMessage(currentLoadingMessageId);
             addMessage('assistant', `Something went wrong: ${error.message || 'Unknown error'}. Please try again.`);
         }
-        speak('Something went wrong. Please try again.');
+        speakText('Something went wrong. Please try again.');
         setStatus('Ready to help');
         currentLoadingMessageId = null;
     }
@@ -670,231 +683,9 @@ function setStatus(text) {
 /**
  * Split text into chunks that are under the character limit, trying to split on sentence boundaries
  */
-function chunkText(text, maxLength = 1900) {
-    // If text is already under limit, return as single chunk
-    if (text.length <= maxLength) {
-        return [text];
-    }
-
-    const chunks = [];
-    let remaining = text;
-
-    while (remaining.length > 0) {
-        if (remaining.length <= maxLength) {
-            chunks.push(remaining);
-            break;
-        }
-
-        // Try to find a good break point (sentence ending)
-        let chunk = remaining.substring(0, maxLength);
-        const lastPeriod = chunk.lastIndexOf('.');
-        const lastExclamation = chunk.lastIndexOf('!');
-        const lastQuestion = chunk.lastIndexOf('?');
-        const lastNewline = chunk.lastIndexOf('\n');
-        
-        // Find the best break point (prefer sentence endings, then newlines)
-        let breakPoint = Math.max(lastPeriod, lastExclamation, lastQuestion, lastNewline);
-        
-        // If we found a good break point (within last 200 chars), use it
-        if (breakPoint > maxLength - 200 && breakPoint > 0) {
-            chunk = remaining.substring(0, breakPoint + 1).trim();
-            remaining = remaining.substring(breakPoint + 1).trim();
-        } else {
-            // No good break point, just split at maxLength
-            chunk = remaining.substring(0, maxLength).trim();
-            remaining = remaining.substring(maxLength).trim();
-        }
-
-        if (chunk.length > 0) {
-            chunks.push(chunk);
-        }
-    }
-
-    return chunks;
-}
-
-/**
- * Speak text using Deepgram TTS, chunking if necessary
- */
-async function speak(text) {
-    if (isMuted || !text.trim()) return;
-
-    // Stop any ongoing speech
-    stopAllAudio();
-
-    if (!elevenlabsApiKey) {
-        console.warn('No ElevenLabs API key for TTS');
-        return;
-    }
-
-    try {
-        // Split text into chunks if it's too long
-        const chunks = chunkText(text.trim(), 1900); // Use 1900 to be safe (under 2000 limit)
-
-        console.log(`TTS: Splitting text into ${chunks.length} chunk(s)`);
-
-        // Process chunks sequentially
-        for (let i = 0; i < chunks.length; i++) {
-            const chunk = chunks[i];
-            const voiceId = selectedVoice || '21m00Tcm4TlvDq8ikWAM'; // Rachel default
-
-            const response = await fetch(
-                `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
-                {
-                    method: 'POST',
-                    headers: {
-                        'xi-api-key': elevenlabsApiKey,
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        text: chunk,
-                        model_id: 'eleven_multilingual_v2',
-                        voice_settings: {
-                            stability: 0.5,
-                            similarity_boost: 0.5
-                        }
-                    })
-                }
-            );
-
-            if (!response.ok) {
-                const errorText = await response.text();
-                console.error('ElevenLabs TTS API error:', response.status, errorText);
-
-                // For 401 errors (invalid API key), fail silently
-                if (response.status === 401) {
-                    console.error('ElevenLabs: Invalid API key');
-                    return;
-                }
-
-                // For 403 errors (quota exceeded), fail silently
-                if (response.status === 403) {
-                    console.error('ElevenLabs: Quota exceeded');
-                    return;
-                }
-
-                // For 413 errors (payload too large), try to chunk even smaller
-                if (response.status === 413) {
-                    console.warn('TTS chunk still too large, splitting further...');
-                    const smallerChunks = chunkText(chunk, 1000);
-                    for (const smallerChunk of smallerChunks) {
-                        await speakChunk(smallerChunk);
-                    }
-                    continue;
-                }
-
-                // Don't throw for TTS errors - just log and continue
-                console.warn('TTS error (non-critical):', response.status);
-                return;
-            }
-
-            const audioBlob = await response.blob();
-            const audioUrl = URL.createObjectURL(audioBlob);
-
-            // Create and play audio
-            const audio = new Audio(audioUrl);
-            currentAudioQueue.push(audio);
-
-            // Wait for this chunk to finish before playing the next one
-            await new Promise((resolve, reject) => {
-                audio.onended = () => {
-                    URL.revokeObjectURL(audioUrl);
-                    currentAudioQueue = currentAudioQueue.filter(a => a !== audio);
-                    isPlayingAudio = currentAudioQueue.length > 0;
-                    resolve();
-                };
-
-                audio.onerror = (error) => {
-                    console.error('Audio playback error:', error);
-                    URL.revokeObjectURL(audioUrl);
-                    currentAudioQueue = currentAudioQueue.filter(a => a !== audio);
-                    isPlayingAudio = currentAudioQueue.length > 0;
-                    reject(error);
-                };
-
-                isPlayingAudio = true;
-                audio.play().catch(reject);
-            });
-        }
-
-    } catch (error) {
-        console.error('TTS error:', error);
-        // Don't show error to user for TTS failures - just log it
-        // The text message will still be displayed
-    }
-}
-
-/**
- * Helper function to speak a single chunk (used for recursive splitting)
- */
-async function speakChunk(chunk) {
-    if (!elevenlabsApiKey || !chunk.trim()) return;
-
-    try {
-        const voiceId = selectedVoice || '21m00Tcm4TlvDq8ikWAM'; // Rachel default
-
-        const response = await fetch(
-            `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
-            {
-                method: 'POST',
-                headers: {
-                    'xi-api-key': elevenlabsApiKey,
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    text: chunk,
-                    model_id: 'eleven_monolingual_v1',
-                    voice_settings: {
-                        stability: 0.5,
-                        similarity_boost: 0.5
-                    }
-                })
-            }
-        );
-
-        if (!response.ok) {
-            console.error('TTS API error for chunk:', response.status);
-            return;
-        }
-
-        const audioBlob = await response.blob();
-        const audioUrl = URL.createObjectURL(audioBlob);
-        const audio = new Audio(audioUrl);
-        currentAudioQueue.push(audio);
-
-        await new Promise((resolve, reject) => {
-            audio.onended = () => {
-                URL.revokeObjectURL(audioUrl);
-                currentAudioQueue = currentAudioQueue.filter(a => a !== audio);
-                isPlayingAudio = currentAudioQueue.length > 0;
-                resolve();
-            };
-
-            audio.onerror = (error) => {
-                URL.revokeObjectURL(audioUrl);
-                currentAudioQueue = currentAudioQueue.filter(a => a !== audio);
-                isPlayingAudio = currentAudioQueue.length > 0;
-                reject(error);
-            };
-
-            isPlayingAudio = true;
-            audio.play().catch(reject);
-        });
-    } catch (error) {
-        console.error('TTS chunk error:', error);
-    }
-}
-
-/**
- * Stop all ongoing audio playback
- */
-function stopAllAudio() {
-    currentAudioQueue.forEach(audio => {
-        audio.pause();
-        audio.currentTime = 0;
-    });
-    currentAudioQueue = [];
-    isPlayingAudio = false;
+async function speakText(text) {
+    if (isMuted) return;
+    await speak(text, ttsProvider, elevenlabsApiKey, deepgramApiKey, selectedVoice);
 }
 
 /**
