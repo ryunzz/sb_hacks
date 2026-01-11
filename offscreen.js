@@ -15,91 +15,66 @@ isReady = true;
 chrome.runtime.sendMessage({ type: 'offscreen-ready' });
 
 // Listen for messages from the background script
+// IMPORTANT: Only handle messages with 'offscreen-' prefix (from background script)
+// This avoids race conditions with sidepanel's 'start-recording' messages
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    console.log('Offscreen: Received message:', message.type, message);
-    
+    // Only handle messages meant for this offscreen document (prefixed with 'offscreen-')
+    if (message.type !== 'offscreen-start-recording' && message.type !== 'offscreen-stop-recording') {
+        // Return false to indicate we're not handling this message
+        return false;
+    }
+
+    console.log('Offscreen: Received message:', message.type);
+
     // Handle async operations
     (async () => {
         switch (message.type) {
-            case 'start-recording':
+            case 'offscreen-start-recording':
                 // Ensure we're ready before starting
                 if (!isReady) {
                     sendResponse({ success: false, error: 'Offscreen document not ready' });
                     return;
                 }
-                
+
                 // Prevent multiple simultaneous recordings
                 if (isRecording) {
                     console.warn('Offscreen: Recording already in progress, ignoring duplicate start request');
                     sendResponse({ success: false, error: 'Recording already in progress' });
                     return;
                 }
-                
+
                 // Log API key status (without exposing the actual key)
                 console.log('Offscreen: API key received in message:', {
                     hasApiKey: !!message.deepgramApiKey,
                     apiKeyType: typeof message.deepgramApiKey,
                     apiKeyLength: message.deepgramApiKey ? message.deepgramApiKey.length : 0,
-                    apiKeyPreview: message.deepgramApiKey ? message.deepgramApiKey.substring(0, 10) + '...' : 'none',
                     language: message.language
                 });
-                
+
                 // Get API key from message (offscreen documents have limited chrome.storage access)
-                // The background script fetches from storage and passes it in the message
                 let apiKey = message.deepgramApiKey || '';
-                
+
                 // Validate API key is present and not empty
                 if (!apiKey || typeof apiKey !== 'string' || apiKey.trim() === '') {
-                    console.error('Offscreen: API key validation failed:', {
-                        apiKey: apiKey,
-                        isEmpty: !apiKey || apiKey.trim() === '',
-                        isNull: apiKey === null,
-                        isUndefined: apiKey === undefined,
-                        messageKeys: Object.keys(message)
-                    });
+                    console.error('Offscreen: API key validation failed - key is missing or invalid');
                     isRecording = false;
-                    sendResponse({ 
-                        success: false, 
-                        error: 'Deepgram API key is required. Please configure it in settings.' 
+                    const errorMsg = 'Deepgram API key is required. Please open extension settings (click the gear icon) and enter your Deepgram API key.';
+                    sendResponse({
+                        success: false,
+                        error: errorMsg
                     });
                     chrome.runtime.sendMessage({
                         type: 'recording-error',
-                        error: 'Deepgram API key is required. Please configure it in settings.'
-                    });
+                        error: errorMsg
+                    }).catch(err => console.error('Failed to send recording error:', err));
                     return;
                 }
-                
-                console.log('Offscreen: API key from message:', {
-                    hasApiKey: !!apiKey,
-                    apiKeyType: typeof apiKey,
-                    apiKeyLength: apiKey ? apiKey.length : 0,
-                    apiKeyPreview: apiKey ? apiKey.substring(0, 10) + '...' : 'none'
-                });
-                
+
                 // Trim whitespace
-                if (apiKey) {
-                    apiKey = apiKey.trim();
-                }
-                
-                // Final check if API key exists
-                if (!apiKey || apiKey === '') {
-                    const error = 'Deepgram API key is missing. Please:\n' +
-                        '1. Open extension settings (click the gear icon)\n' +
-                        '2. Enter your Deepgram API key\n' +
-                        '3. Click "Save Settings"\n' +
-                        '4. Try again';
-                    console.error('Offscreen: API key validation failed:', {
-                        apiKey: apiKey,
-                        isEmpty: apiKey === '',
-                        isNull: apiKey === null,
-                        isUndefined: apiKey === undefined
-                    });
-                    sendResponse({ success: false, error });
-                    return;
-                }
-                
+                apiKey = apiKey.trim();
+
                 console.log('Offscreen: API key validated successfully, proceeding with recording...');
-                
+
                 try {
                     await startRecording(apiKey, message.language || 'en');
                     sendResponse({ success: true });
@@ -109,20 +84,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 }
                 break;
 
-            case 'stop-recording':
+            case 'offscreen-stop-recording':
                 stopRecording();
                 sendResponse({ success: true });
                 break;
-
-            default:
-                sendResponse({ 
-                    success: false,
-                    error: 'Unknown message type',
-                    type: 'error'
-                });
         }
     })();
-    
+
     return true; // Indicates we will send a response asynchronously
 });
 
@@ -137,7 +105,7 @@ async function startRecording(deepgramApiKey, language = 'en') {
         // Wait for cleanup to complete
         await new Promise(resolve => setTimeout(resolve, 600));
     }
-    
+
     // Ensure any leftover socket is cleaned up
     if (window.deepgramSocket) {
         console.warn('Offscreen: Cleaning up leftover WebSocket from previous session');
@@ -151,7 +119,7 @@ async function startRecording(deepgramApiKey, language = 'en') {
         window.deepgramSocket = null;
         currentDeepgramSocket = null;
     }
-    
+
     // Ensure all state is reset
     if (mediaRecorder) {
         mediaRecorder = null;
@@ -164,10 +132,10 @@ async function startRecording(deepgramApiKey, language = 'en') {
         }
         audioStream = null;
     }
-    
+
     // Set recording flag
     isRecording = true;
-    
+
     try {
         // Check if getUserMedia is available
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -181,7 +149,7 @@ async function startRecording(deepgramApiKey, language = 'en') {
             const result = await navigator.permissions.query({ name: 'microphone' });
             permissionState = result.state;
             console.log('Microphone permission state:', permissionState);
-            
+
             // If permission was previously denied, provide helpful message
             if (permissionState === 'denied') {
                 throw new Error('PERMISSION_DENIED_PERSISTENT');
@@ -195,7 +163,7 @@ async function startRecording(deepgramApiKey, language = 'en') {
         }
 
         console.log('Requesting microphone access...');
-        
+
         // Request microphone access with explicit permission request
         // This should trigger Chrome's permission prompt if not already granted
         // Note: Some browsers may ignore specific constraints, so we request what we want
@@ -211,7 +179,7 @@ async function startRecording(deepgramApiKey, language = 'en') {
                 sampleRate: { ideal: 16000 }
             }
         };
-        
+
         console.log('Requesting microphone with constraints:', audioConstraints);
         audioStream = await navigator.mediaDevices.getUserMedia(audioConstraints);
 
@@ -241,14 +209,14 @@ async function startRecording(deepgramApiKey, language = 'en') {
         // Deepgram WebSocket API - let it auto-detect encoding
         // WebM/Opus is automatically detected, no need to specify encoding
         const deepgramUrl = `wss://api.deepgram.com/v1/listen?model=nova-2&punctuate=true&smart_format=true&interim_results=true${languageParam}`;
-        
+
         console.log('Connecting to Deepgram WebSocket...');
         console.log('Deepgram URL:', deepgramUrl);
         console.log('Using API key (length):', deepgramApiKey.trim().length);
-        
+
         // Deepgram requires the token as a subprotocol in Sec-WebSocket-Protocol header
         const deepgramSocket = new WebSocket(deepgramUrl, ['token', deepgramApiKey.trim()]);
-        
+
         // Set a connection timeout (store in window for cleanup)
         let connectionTimeout = setTimeout(() => {
             if (deepgramSocket.readyState !== WebSocket.OPEN) {
@@ -261,7 +229,7 @@ async function startRecording(deepgramApiKey, language = 'en') {
                 stopRecording();
             }
         }, 10000); // 10 second timeout
-        
+
         // Store timeout for cleanup
         window.deepgramConnectionTimeout = connectionTimeout;
 
@@ -292,7 +260,7 @@ async function startRecording(deepgramApiKey, language = 'en') {
                     'audio/ogg;codecs=opus',
                     'audio/ogg'
                 ];
-                
+
                 let selectedMimeType = null;
                 for (const mimeType of supportedTypes) {
                     if (MediaRecorder.isTypeSupported(mimeType)) {
@@ -300,21 +268,21 @@ async function startRecording(deepgramApiKey, language = 'en') {
                         break;
                     }
                 }
-                
+
                 if (!selectedMimeType) {
                     // Fallback to browser default
                     selectedMimeType = '';
                 }
-                
+
                 console.log('MediaRecorder: Using MIME type:', selectedMimeType || 'browser default');
-                
+
                 // Double-check audioStream is still valid
                 if (!audioStream || audioStream.getTracks().length === 0) {
                     console.error('Offscreen: Audio stream is invalid, cannot start MediaRecorder');
                     deepgramSocket.close();
                     return;
                 }
-                
+
                 console.log('MediaRecorder: Audio stream tracks:', audioStream.getTracks().map(t => ({
                     kind: t.kind,
                     enabled: t.enabled,
@@ -334,9 +302,9 @@ async function startRecording(deepgramApiKey, language = 'en') {
                     if (event.data && event.data.size > 0) {
                         chunkCount++;
                         totalBytesSent += event.data.size;
-                        
+
                         console.log(`MediaRecorder: Chunk ${chunkCount} - Size: ${event.data.size} bytes, Total: ${totalBytesSent} bytes`);
-                        
+
                         if (deepgramSocket?.readyState === WebSocket.OPEN) {
                             try {
                                 // Deepgram WebSocket expects binary data (ArrayBuffer or Blob)
@@ -399,13 +367,13 @@ async function startRecording(deepgramApiKey, language = 'en') {
                 // Deepgram sends JSON text messages (not binary)
                 const text = typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data);
                 const data = JSON.parse(text);
-                
+
                 // Handle Results messages - these contain transcripts
                 if (data.type === 'Results' || data.type === 'results') {
                     // Extract transcript from various possible formats
                     let newTranscript = null;
                     let isFinal = false;
-                    
+
                     // Format 1: data.channel.alternatives[0].transcript
                     if (data.channel?.alternatives?.[0]?.transcript) {
                         newTranscript = data.channel.alternatives[0].transcript.trim();
@@ -421,54 +389,63 @@ async function startRecording(deepgramApiKey, language = 'en') {
                         newTranscript = data.results.channel.alternatives[0].transcript.trim();
                         isFinal = data.results.is_final === true;
                     }
-                    
+
                     if (newTranscript && newTranscript.length > 0) {
                         if (isFinal) {
-                            // Final transcript - Deepgram sends the complete utterance
-                            // Store it and send update
-                            transcript = newTranscript;
-                            lastInterimTranscript = newTranscript; // Update last interim too
-                            console.log('Deepgram: Final transcript:', transcript);
-                            
-                            // Send final transcript update
+                            // Final transcript - append to accumulated transcript
+                            // Add space before if we already have content
+                            if (transcript.trim()) {
+                                transcript += ' ' + newTranscript;
+                            } else {
+                                transcript = newTranscript;
+                            }
+                            lastInterimTranscript = ''; // Clear interim since we got final
+                            console.log('Deepgram: Final transcript (accumulated):', transcript);
+
+                            // Send accumulated transcript update
                             chrome.runtime.sendMessage({
                                 type: 'transcript-update',
                                 transcript: transcript,
                                 isFinal: true
                             });
                         } else {
-                            // Interim result - show live updates
+                            // Interim result - show accumulated + current interim
                             lastInterimTranscript = newTranscript;
-                            console.log('Deepgram: Interim transcript:', newTranscript);
-                            
+                            const displayTranscript = transcript.trim()
+                                ? transcript + ' ' + newTranscript
+                                : newTranscript;
+                            console.log('Deepgram: Interim transcript:', displayTranscript);
+
                             // Send interim transcript for real-time display
                             chrome.runtime.sendMessage({
                                 type: 'transcript-update',
-                                transcript: newTranscript,
+                                transcript: displayTranscript,
                                 isFinal: false
                             });
                         }
                     }
                 }
-                // Handle UtteranceEnd - speech has ended
+                // Handle UtteranceEnd - speech has ended (pause detected)
                 else if (data.type === 'UtteranceEnd') {
-                    console.log('Deepgram: Utterance ended');
-                    // If we have a final transcript, it's already been sent
-                    // If we only have interim, use that
-                    if (transcript.trim()) {
-                        chrome.runtime.sendMessage({
-                            type: 'transcript-update',
-                            transcript: transcript.trim(),
-                            isFinal: true
-                        });
-                    } else if (lastInterimTranscript) {
-                        transcript = lastInterimTranscript;
+                    console.log('Deepgram: Utterance ended (pause detected)');
+                    // If we have an interim that wasn't finalized, add it to accumulated
+                    if (lastInterimTranscript && lastInterimTranscript.trim()) {
+                        if (transcript.trim()) {
+                            transcript += ' ' + lastInterimTranscript;
+                        } else {
+                            transcript = lastInterimTranscript;
+                        }
+                        lastInterimTranscript = '';
+                        console.log('Deepgram: Added interim to accumulated on utterance end:', transcript);
+
+                        // Send update with accumulated transcript
                         chrome.runtime.sendMessage({
                             type: 'transcript-update',
                             transcript: transcript,
                             isFinal: true
                         });
                     }
+                    // Don't send transcript-result here - wait for user to stop recording
                 }
                 // Handle other message types
                 else if (data.type === 'Metadata') {
@@ -486,26 +463,26 @@ async function startRecording(deepgramApiKey, language = 'en') {
 
         deepgramSocket.onclose = (event) => {
             console.log('Offscreen: Deepgram disconnected', event.code, event.reason, 'wasClean:', event.wasClean);
-            
+
             // Clean up timeout if still exists
             if (window.deepgramConnectionTimeout) {
                 clearTimeout(window.deepgramConnectionTimeout);
                 window.deepgramConnectionTimeout = null;
             }
-            
+
             // Always check if we have a transcript first, regardless of close code
             // Code 1011 can happen even when we have a valid transcript
             let finalTranscript = transcript.trim();
-            
+
             // If no final transcript but we have an interim, use that
             if (!finalTranscript && lastInterimTranscript) {
                 console.log('Deepgram: No final transcript, using last interim:', lastInterimTranscript);
                 finalTranscript = lastInterimTranscript;
             }
-            
+
             // Reset recording flag
             isRecording = false;
-            
+
             if (finalTranscript) {
                 // We have a transcript - send it regardless of close code
                 console.log('Deepgram: Sending transcript on close:', finalTranscript);
@@ -516,7 +493,7 @@ async function startRecording(deepgramApiKey, language = 'en') {
             } else {
                 // No transcript - check if it's an error or just no speech detected
                 const isNormalClosure = event.code === 1005 || event.code === 1000 || event.code === 1001;
-                
+
                 if (isNormalClosure) {
                     console.log('Deepgram: Normal closure but no transcript received (no speech detected)');
                     chrome.runtime.sendMessage({
@@ -526,7 +503,7 @@ async function startRecording(deepgramApiKey, language = 'en') {
                 } else {
                     // Unexpected closure without transcript
                     let errorMsg = 'Deepgram connection closed unexpectedly';
-                    
+
                     if (event.code === 1008) {
                         errorMsg = 'Deepgram authentication failed. Please check your API key in settings.';
                     } else if (event.code === 1006) {
@@ -543,7 +520,7 @@ async function startRecording(deepgramApiKey, language = 'en') {
                     } else if (event.code >= 1011 && event.code <= 1015) {
                         errorMsg = 'Deepgram service error. Please try again in a moment.';
                     }
-                    
+
                     console.error('Deepgram close event details:', {
                         code: event.code,
                         reason: event.reason,
@@ -553,7 +530,7 @@ async function startRecording(deepgramApiKey, language = 'en') {
                         transcriptLength: transcript.length,
                         transcript: finalTranscript || '(empty)'
                     });
-                    
+
                     chrome.runtime.sendMessage({
                         type: 'recording-error',
                         error: errorMsg
@@ -568,14 +545,14 @@ async function startRecording(deepgramApiKey, language = 'en') {
                 clearTimeout(window.deepgramConnectionTimeout);
                 window.deepgramConnectionTimeout = null;
             }
-            
+
             // Note: WebSocket onerror doesn't provide much detail
             // The actual error will be in onclose with the close code
             // But we can check the readyState and API key
-            
+
             const readyState = deepgramSocket.readyState;
             let errorMessage = 'Deepgram connection error';
-            
+
             // Check if we have an API key
             if (!deepgramApiKey || deepgramApiKey.trim() === '') {
                 errorMessage = 'Deepgram API key is missing. Please configure it in settings.';
@@ -586,14 +563,14 @@ async function startRecording(deepgramApiKey, language = 'en') {
                 // Connection error - likely network or authentication issue
                 errorMessage = 'Deepgram connection error. Please verify your API key is correct in settings.';
             }
-            
+
             console.error('Deepgram error details:', {
                 readyState,
                 hasApiKey: !!deepgramApiKey,
                 apiKeyLength: deepgramApiKey ? deepgramApiKey.length : 0,
                 apiKeyPrefix: deepgramApiKey ? deepgramApiKey.substring(0, 10) + '...' : 'none'
             });
-            
+
             // Only send error if socket is already closed (onclose might not fire in some cases)
             // Otherwise, let onclose handle it with more details
             if (readyState === WebSocket.CLOSED) {
@@ -614,7 +591,7 @@ async function startRecording(deepgramApiKey, language = 'en') {
         console.error('Offscreen: Microphone error:', error.name, error.message);
         let errorMessage = 'Microphone access failed';
         let showSettingsLink = false;
-        
+
         if (error.name === 'NotAllowedError' || error.message === 'PERMISSION_DENIED_PERSISTENT') {
             errorMessage = 'Microphone permission denied. To fix this:\n\n' +
                 '1. Click the lock/padlock icon in Chrome\'s address bar\n' +
@@ -631,7 +608,7 @@ async function startRecording(deepgramApiKey, language = 'en') {
         } else {
             errorMessage = `Microphone error: ${error.message}`;
         }
-        
+
         chrome.runtime.sendMessage({
             type: 'recording-error',
             error: errorMessage,
@@ -647,10 +624,10 @@ async function startRecording(deepgramApiKey, language = 'en') {
  */
 function stopRecording() {
     console.log('Stop recording called, isRecording:', isRecording);
-    
+
     // Set flag first to prevent new recordings
     isRecording = false;
-    
+
     // Stop MediaRecorder first
     if (mediaRecorder) {
         console.log('MediaRecorder state before stop:', mediaRecorder.state);
@@ -678,13 +655,13 @@ function stopRecording() {
         }
         audioStream = null;
     }
-    
+
     // Send Finalize message to flush the stream and get final transcripts
     // Per Deepgram docs: https://developers.deepgram.com/docs/finalize
     if (window.deepgramSocket) {
         const socketState = window.deepgramSocket.readyState;
         console.log('Deepgram socket state during stop:', socketState);
-        
+
         if (socketState === WebSocket.OPEN) {
             try {
                 console.log('Sending Finalize message to Deepgram');
@@ -724,8 +701,8 @@ function stopRecording() {
             window.deepgramSocket = null;
         }
     }
-    
+
     currentDeepgramSocket = null;
-    
+
     console.log('Recording cleanup complete');
 }

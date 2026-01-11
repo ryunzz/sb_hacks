@@ -152,7 +152,19 @@ function setupOffscreenListeners() {
                 const errorMsg = message.error || 'Voice recognition failed. Please try again.';
                 // Replace newlines with line breaks for HTML display
                 const formattedError = errorMsg.replace(/\n/g, '<br>');
-                addMessage('assistant', formattedError, false, true);
+                // Only show error once - check if we already have this error message
+                const lastMessage = messagesContainer.lastElementChild;
+                const lastMessageText = lastMessage?.querySelector('.message-content')?.textContent || '';
+                if (!lastMessageText.includes('Deepgram API key') && !lastMessageText.includes('API key')) {
+                    addMessage('assistant', formattedError, false, true);
+                }
+                // Reset listening state
+                isListening = false;
+                voiceBtn.classList.remove('listening');
+                voiceBtn.querySelector('.voice-text').textContent = 'Start Recording';
+                voiceBtn.setAttribute('aria-label', 'Start recording');
+                voiceBtn.setAttribute('title', 'Click to start recording');
+                setStatus('Ready to help');
                 
                 // If permission was denied, show request permission button
                 if (message.showSettingsLink || (errorMsg && errorMsg.includes('permission'))) {
@@ -336,8 +348,18 @@ async function requestMicrophonePermission() {
 async function startListening() {
     if (isListening) return;
 
+    // Try to load API key if not available
+    if (!deepgramApiKey || deepgramApiKey.trim() === '') {
+        try {
+            const config = await chrome.storage.local.get(['deepgramApiKey']);
+            deepgramApiKey = config.deepgramApiKey || '';
+        } catch (error) {
+            console.error('Failed to load Deepgram API key:', error);
+        }
+    }
+
     // Check for API key
-    if (!deepgramApiKey) {
+    if (!deepgramApiKey || deepgramApiKey.trim() === '') {
         addMessage('assistant', 'Please set up your Deepgram API key in settings to use voice input. You can still type messages below.');
         speak('Please set up your Deepgram API key in settings to use voice input.');
         return;
@@ -765,17 +787,22 @@ async function speak(text) {
     // Stop any ongoing speech
     stopAllAudio();
 
-    if (!deepgramApiKey) {
-        console.warn('No Deepgram API key for TTS');
+    // Try to load API key if not available
+    if (!deepgramApiKey || deepgramApiKey.trim() === '') {
+        try {
+            const config = await chrome.storage.local.get(['deepgramApiKey']);
+            deepgramApiKey = config.deepgramApiKey || '';
+        } catch (error) {
+            console.warn('Failed to load Deepgram API key for TTS:', error);
+        }
+    }
+
+    if (!deepgramApiKey || deepgramApiKey.trim() === '') {
+        console.warn('No Deepgram API key for TTS - skipping speech output');
         return;
     }
 
     try {
-        // Validate API key
-        if (!deepgramApiKey || deepgramApiKey.trim() === '') {
-            console.warn('No Deepgram API key for TTS');
-            return;
-        }
 
         // Split text into chunks if it's too long
         const chunks = chunkText(text.trim(), 1900); // Use 1900 to be safe (under 2000 limit)
